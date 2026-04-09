@@ -37,6 +37,14 @@ export class SubscriptionPlanDto {
     stripe_member_lookup_key: string | null;
 }
 
+/**
+ * Réponse publique GET /subscription/plans : plans + indicateur Stripe.
+ */
+export interface AvailablePlansResponseDto {
+    plans: SubscriptionPlanDto[];
+    stripe_enabled: boolean;
+}
+
 export class CreateSubscriptionDto {
     @IsString()
     plan_slug: string;

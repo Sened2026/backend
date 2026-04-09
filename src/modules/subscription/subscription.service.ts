@@ -13,6 +13,7 @@ import {
     SubscriptionPlanDto,
     SubscriptionWithPlansDto,
     SubscribeResponseDto,
+    AvailablePlansResponseDto,
     CreateRegistrationSubscriptionDto,
     RegistrationSubscriptionResponseDto,
     FinalizeRegistrationSubscriptionResponseDto,
@@ -787,9 +788,13 @@ export class SubscriptionService {
         return this.hydrateSubscription(supabase, subscription);
     }
 
-    async getAvailablePlans(): Promise<SubscriptionPlanDto[]> {
+    async getAvailablePlans(): Promise<AvailablePlansResponseDto> {
         const supabase = getSupabaseAdmin();
-        return this.getAvailablePlansFromDb(supabase);
+        const plans = await this.getAvailablePlansFromDb(supabase);
+        return {
+            plans,
+            stripe_enabled: this.isStripeEnabled(),
+        };
     }
 
     /**
