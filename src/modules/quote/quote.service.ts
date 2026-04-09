@@ -816,7 +816,7 @@ export class QuoteService {
         // Créer le nouveau devis
         const createDto: CreateQuoteDto = {
             client_id: originalQuote.client_id,
-            title: originalQuote.title ? `${originalQuote.title} (copie)` : 'Copie de devis',
+            title: originalQuote.title ?? undefined,
             introduction: originalQuote.introduction || undefined,
             issue_date: issueDate,
             validity_date: validityDate,
