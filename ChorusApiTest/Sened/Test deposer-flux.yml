@@ -1,0 +1,62 @@
+info:
+  name: Test deposer/flux
+  type: http
+  seq: 8
+
+http:
+  method: POST
+  url: "{{base_url}}/cpro/factures/v1/soumettre"
+  headers:
+    - name: Authorization
+      value: Bearer {{access_token}}
+    - name: cpro-account
+      value: "{{cpro_account}}"
+    - name: Content-Type
+      value: application/json;charset=utf-8
+    - name: Accept
+      value: application/json;charset=utf-8
+  body:
+    type: json
+    data: |-
+      {
+        "cadreDeFacturation": {
+          "codeCadreFacturation": "A1_FACTURE_FOURNISSEUR"
+        },
+        "dateFacture": "2026-03-23T10:00:00Z",
+        "destinataire": {
+          "codeDestinataire": "12345678200051"
+        },
+        "fournisseur": {
+          "idFournisseur": 26356995
+        },
+        "modeDepot": "SAISIE_API",
+        "montantTotal": {
+          "montantHtTotal": 100.00,
+          "montantTVA": 20.00,
+          "montantTtcTotal": 120.00,
+          "montantAPayer": 120.00
+        },
+        "numeroFactureSaisi": "TEST-QUALIF-0002",
+        "references": {
+          "deviseFacture": "EUR",
+          "modePaiement": "VIREMENT",
+          "typeFacture": "FACTURE",
+          "typeTva": "TVA_SUR_DEBIT"
+        }
+      }
+  auth: inherit
+
+runtime:
+  variables:
+    - name: base_url
+      value: https://sandbox-api.piste.gouv.fr
+    - name: cpro_account
+      value: VEVDSF8xXzMyMDUxMzIxNDkzNTkyQGNwcm8uZnI6Nnp5eVV1d3Iqem9mbQ==
+    - name: access_token
+      value: RCQu16jywl9v8xkOu1scjNIh5go0nPV6A1XjYhTy5ZPXw8uLt3PPeR
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

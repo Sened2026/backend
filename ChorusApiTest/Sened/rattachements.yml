@@ -1,0 +1,42 @@
+info:
+  name: rattachements
+  type: http
+  seq: 9
+
+http:
+  method: POST
+  url: https://sandbox-api.piste.gouv.fr/cpro/utilisateurs/v1/monCompte/recuperer/rattachements
+  headers:
+    - name: Authorization
+      value: Bearer {{access_token}}
+    - name: cpro-account
+      value: "{{cpro_account}}"
+    - name: Content-Type
+      value: application/json;charset=utf-8
+    - name: Accept
+      value: application/json;charset=utf-8
+  body:
+    type: json
+    data: |-
+      {
+          "parametresRecherche": {
+            "nbResultatsParPage": 100,
+            "pageResultatDemandee": 1,
+            "triColonne": "IdentifiantStructure",
+            "triSens": "Ascendant"
+          }
+        }
+  auth: inherit
+
+runtime:
+  variables:
+    - name: access_token
+      value: RCQu16jywl9v8xkOu1scjNIh5go0nPV6A1XjYhTy5ZPXw8uLt3PPeR
+    - name: cpro_account
+      value: VEVDSF8xXzMyMDUxMzIxNDkzNTkyQGNwcm8uZnI6Nnp5eVV1d3Iqem9mbQ==
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

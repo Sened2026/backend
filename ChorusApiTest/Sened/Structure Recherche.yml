@@ -1,0 +1,41 @@
+info:
+  name: "Structure Recherche "
+  type: http
+  seq: 7
+
+http:
+  method: POST
+  url: https://sandbox-api.piste.gouv.fr/cpro/structures/v1/rechercher
+  headers:
+    - name: Authorization
+      value: Bearer Ty8L91TqCYiT31qTLamSDzrLlpsb7SmdvnWv3rxpXv076JNPc3T2oR
+    - name: cpro-account
+      value: VEVDSF8xXzMyMDUxMzIxNDkzNTkyQGNwcm8uZnI6Nnp5eVV1d3Iqem9mbQ==
+    - name: Content-Type
+      value: application/json;charset=utf-8
+    - name: Accept
+      value: application/json;charset=utf-8
+  body:
+    type: json
+    data: |-
+      {
+        "structure": {
+          "identifiantStructure": "12345678200051",
+          "typeIdentifiantStructure": "SIRET",
+          "typeStructure": "PUBLIQUE",
+          "statutStructure": "ACTIF"
+        },
+        "parametres": {
+          "nbResultatsParPage": 10,
+          "pageResultatDemandee": 1,
+          "triColonne": "IdentifiantStructure",
+          "triSens": "Ascendant"
+        }
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

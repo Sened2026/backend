@@ -1,0 +1,28 @@
+info:
+  name: Token Fetch
+  type: http
+  seq: 1
+
+http:
+  method: POST
+  url: https://sandbox-oauth.piste.gouv.fr/api/oauth/token
+  headers:
+    - name: Content-Type
+      value: application/x-www-form-urlencoded
+  body:
+    type: form-urlencoded
+    data:
+      - name: grant_type
+        value: client_credentials
+      - name: client_id
+        value: 99b94234-916a-43ad-87d1-d40cf41b3511
+      - name: client_secret
+        value: defdfafb-b9fd-4899-bb50-6ac3ebee595e
+      - name: scope
+        value: openid
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

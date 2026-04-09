@@ -1,0 +1,63 @@
+info:
+  name: annuaire
+  type: http
+  seq: 10
+
+http:
+  method: POST
+  url: https://sandbox-api.piste.gouv.fr/g2b/annuaire/v1/siret/recherche
+  headers:
+    - name: Authorization
+      value: Bearer {{access_token}}
+    - name: cpro-account
+      value: "{{cpro_account}}"
+    - name: Content-Type
+      value: application/json
+    - name: Accept
+      value: application/json
+    - name: Accept-Language
+      value: fr
+  body:
+    type: json
+    data: |-
+      {
+        "filtres": {
+          "siret": {
+            "op": "contient",
+            "valeur": "12345678200051"
+          },
+          "etatAdministratif": {
+            "op": "strict",
+            "valeur": "A"
+          }
+        },
+        "champs": [
+          "siret",
+          "siren",
+          "denomination",
+          "adresse",
+          "etatAdministratif",
+          "gestionCodeService",
+          "gestionEngagementJuridique",
+          "gestionEngagementJuridiqueOuService",
+          "gestionStatutMiseEnPaiement",
+          "moa",
+          "moaUniquement"
+        ],
+        "limite": 10,
+        "ignorer": 0
+      }
+  auth: inherit
+
+runtime:
+  variables:
+    - name: access_token
+      value: 9jN1c9fdNCNOVAfTVirbU3Vl0kauzunTe821W7Cm190fkgapoaSpdN
+    - name: cpro_account
+      value: VEVDSF8xXzMyMDUxMzIxNDkzNTkyQGNwcm8uZnI6Nnp5eVV1d3Iqem9mbQ==
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

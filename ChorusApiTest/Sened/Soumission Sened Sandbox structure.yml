@@ -1,0 +1,43 @@
+info:
+  name: Soumission Sened Sandbox structure
+  type: http
+  seq: 5
+
+http:
+  method: POST
+  url: https://sandbox-api.piste.gouv.fr/cpro/structures/v1/rechercher
+  headers:
+    - name: Content-Type
+      value: application/json;charset=utf-8
+    - name: Authorization
+      value: Bearer eduL8y2lrBbLsNHHZg2DTLkesLAYNWTCC4qvfgaX4spZ8P1GIwMcqU
+    - name: cpro-account
+      value: VEVDSF8xXzUwMjk1NzczNDczMzA2QGNwcm8uZnI6N2tmYipkYUdxdW5lbw==
+    - name: Accept
+      value: application/json;charset=utf-8
+      disabled: true
+  body:
+    type: json
+    data: |-
+      {
+        "structure": {
+          "identifiantStructure": "32051321493592",
+          "typeIdentifiantStructure": "SIRET",
+          "typeStructure": "PRIVEE",
+          "statutStructure": "ACTIF"
+        },
+        "restreindreStructuresPrivees": false,
+        "parametres": {
+          "nbResultatsParPage": 10,
+          "pageResultatDemandee": 1,
+          "triColonne": "IdentifiantStructure",
+          "triSens": "Ascendant"
+        }
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

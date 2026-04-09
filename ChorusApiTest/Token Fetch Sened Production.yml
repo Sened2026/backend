@@ -1,0 +1,28 @@
+info:
+  name: Token Fetch Sened Production
+  type: http
+  seq: 5
+
+http:
+  method: POST
+  url: https://oauth.piste.gouv.fr/api/oauth/token
+  headers:
+    - name: Content-Type
+      value: application/x-www-form-urlencoded
+  body:
+    type: form-urlencoded
+    data:
+      - name: grant_type
+        value: client_credentials
+      - name: client_id
+        value: a23200a9-7519-4deb-965d-7cfe31733509
+      - name: client_secret
+        value: 3bb50524-0a78-4ed7-a87d-cbe30290ed14
+      - name: scope
+        value: openid
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

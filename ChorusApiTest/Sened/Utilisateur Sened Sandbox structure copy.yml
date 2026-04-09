@@ -1,0 +1,36 @@
+info:
+  name: Utilisateur Sened Sandbox structure copy
+  type: http
+  seq: 6
+
+http:
+  method: POST
+  url: https://sandbox-api.piste.gouv.fr/cpro/utilisateurs/v1/monCompte/recuperer/rattachements
+  headers:
+    - name: Content-Type
+      value: application/json;charset=utf-8
+    - name: Authorization
+      value: Bearer vTvEiIM03QjzpCS7FyzwS0qvB0TIDtSx4XFy4zwnQxtoHWj6B5Srby
+    - name: cpro-account
+      value: VEVDSF8xXzUwMjk1NzczNDczMzA2QGNwcm8uZnI6N2tmYipkYUdxdW5lbw==
+    - name: Accept
+      value: application/json;charset=utf-8
+      disabled: true
+  body:
+    type: json
+    data: |-
+      {
+          "parametresRecherche": {
+            "nbResultatsParPage": 100,
+            "pageResultatDemandee": 1,
+            "triColonne": "IdentifiantStructure",
+            "triSens": "Ascendant"
+          }
+        }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

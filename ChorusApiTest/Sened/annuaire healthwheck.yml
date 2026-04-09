@@ -1,0 +1,34 @@
+info:
+  name: annuaire healthwheck
+  type: http
+  seq: 11
+
+http:
+  method: GET
+  url: https://sandbox-api.piste.gouv.fr/g2b/annuaire/v1/healthcheck
+  headers:
+    - name: Authorization
+      value: Bearer {{access_token}}
+    - name: cpro-account
+      value: "{{cpro_account}}"
+    - name: Content-Type
+      value: application/json
+      disabled: true
+    - name: Accept
+      value: application/json
+    - name: Accept-Language
+      value: fr
+  auth: inherit
+
+runtime:
+  variables:
+    - name: access_token
+      value: 9jN1c9fdNCNOVAfTVirbU3Vl0kauzunTe821W7Cm190fkgapoaSpdN
+    - name: cpro_account
+      value: VEVDSF8xXzMyMDUxMzIxNDkzNTkyQGNwcm8uZnI6Nnp5eVV1d3Iqem9mbQ==
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

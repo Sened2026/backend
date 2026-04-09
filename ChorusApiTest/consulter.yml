@@ -1,0 +1,37 @@
+info:
+  name: consulter
+  type: http
+  seq: 4
+
+http:
+  method: POST
+  url: https://sandbox-api.piste.gouv.fr/cpro/factures/v1/rechercher/fournisseur
+  headers:
+    - name: Authorization
+      value: Bearer EqYJLYOhlkOqPFOgRD86yY5fT8OSi89Tp6nFY18kRRoldeV93LIbP0
+    - name: cpro-account
+      value: VEVDSF8xXzMzNjk5MDE1NTQ1OTc4QGNwcm8uZnI6amt2OUB2YUpxa3V6cQ==
+    - name: Content-Type
+      value: application/json
+    - name: Accept
+      value: application/json
+  body:
+    type: json
+    data: |-
+      {
+        "idFournisseur": 33699015545978,
+        "rechercheFactureParFournisseur": {
+          "nbResultatsMaximum": 10,
+          "nbResultatsParPage": 10,
+          "pageResultatDemandee": 1,
+          "triColonne": "DateDepot",
+          "triSens": "Descendant"
+        }
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

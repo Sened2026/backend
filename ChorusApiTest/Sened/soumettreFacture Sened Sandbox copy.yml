@@ -1,0 +1,78 @@
+info:
+  name: soumettreFacture Sened Sandbox copy
+  type: http
+  seq: 3
+
+http:
+  method: POST
+  url: https://sandbox-api.piste.gouv.fr/cpro/factures/v1/soumettre
+  headers:
+    - name: Content-Type
+      value: application/json;charset=utf-8
+    - name: Authorization
+      value: Bearer nFAuPDAS8EUZWiHdsYPri47ZLLc3Yj7HuyrtgIwkZmiSjP0cHC2U0l
+    - name: cpro-account
+      value: VEVDSF8xXzUwMjk1NzczNDczMzA2QGNwcm8uZnI6N2tmYipkYUdxdW5lbw==
+    - name: Accept
+      value: application/json;charset=utf-8
+  body:
+    type: json
+    data: |-
+      {
+        "cadreDeFacturation": {
+          "codeCadreFacturation": "A1_FACTURE_FOURNISSEUR"
+        },
+        "commentaire": "Facture test PDF via OCR",
+        "dateFacture": "2026-03-18T00:00:00Z",
+        "destinataire": {
+          "codeDestinataire": "53153848462239"
+        },
+        "fournisseur": {
+          "idFournisseur": 50295773473306
+        },
+        "lignePoste": [
+          {
+            "lignePosteNumero": 1,
+            "lignePosteDenomination": "testes",
+            "lignePosteQuantite": 1,
+            "lignePosteMontantUnitaireHT": 23.0,
+            "lignePosteMontantRemiseHT": 0,
+            "lignePosteTauxTva": "20.00"
+          }
+        ],
+        "ligneTva": [
+          {
+            "ligneTvaTaux": "20.00",
+            "ligneTvaMontantBaseHtParTaux": 23.0,
+            "ligneTvaMontantTvaParTaux": 4.6
+          }
+        ],
+        "modeDepot": "DEPOT_PDF_API",
+        "montantTotal": {
+          "montantHtTotal": 23.0,
+          "montantTVA": 4.6,
+          "montantTtcTotal": 27.6,
+          "montantAPayer": 27.6,
+          "montantRemiseGlobaleTTC": 0
+        },
+        "numeroFactureSaisi": "FAC-2026-00012",
+        "pieceJointePrincipale": [
+          {
+            "pieceJointePrincipaleDesignation": "facture-FAC-2026-0001.pdf",
+            "pieceJointePrincipaleId": 10759816
+          }
+        ],
+        "references": {
+          "deviseFacture": "EUR",
+          "modePaiement": "VIREMENT",
+          "typeFacture": "FACTURE",
+          "typeTva": "TVA_SUR_DEBIT"
+        }
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

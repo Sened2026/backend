@@ -1,0 +1,71 @@
+info:
+  name: Soumission Facture test
+  type: http
+  seq: 4
+
+http:
+  method: POST
+  url: https://sandbox-api.piste.gouv.fr/cpro/factures/v1/soumettre
+  headers:
+    - name: Authorization
+      value: Bearer EqYJLYOhlkOqPFOgRD86yY5fT8OSi89Tp6nFY18kRRoldeV93LIbP0
+    - name: cpro-account
+      value: VEVDSF8xXzUwMjk1NzczNDczMzA2QGNwcm8uZnI6N2tmYipkYUdxdW5lbw==
+    - name: Content-Type
+      value: application/json;charset=utf-8
+    - name: Accept
+      value: application/json;charset=utf-8
+  body:
+    type: json
+    data: |-
+      {
+        "cadreDeFacturation": {
+          "codeCadreFacturation": "A1_FACTURE_FOURNISSEUR"
+        },
+        "dateFacture": "2026-03-14T22:59:00.000Z",
+        "destinataire": {
+          "codeDestinataire": "12345678200051"
+        },
+        "fournisseur": {
+          "idFournisseur": 33699015545978
+        },
+        "idUtilisateurCourant": 50295773473307,
+        "modeDepot": "SAISIE_API",
+        "montantTotal": {
+          "montantAPayer": 120.0,
+          "montantHtTotal": 100.0,
+          "montantTVA": 20.0,
+          "montantTtcTotal": 120.0
+        },
+        "numeroFactureSaisi": "TEST-CHORUS-0004",
+        "references": {
+          "deviseFacture": "EUR",
+          "modePaiement": "VIREMENT",
+          "typeFacture": "FACTURE",
+          "typeTva": "TVA_SUR_DEBIT"
+        },
+        "lignePoste": [
+          {
+            "lignePosteNumero": 1,
+            "lignePosteDenomination": "Prestation de test",
+            "lignePosteQuantite": 1,
+            "lignePosteMontantUnitaireHT": 100.0,
+            "lignePosteMontantRemiseHT": 0.0,
+            "lignePosteTauxTvaManuel": 20.0
+          }
+        ],
+        "ligneTva": [
+          {
+            "ligneTvaMontantBaseHtParTaux": 100.0,
+            "ligneTvaMontantTvaParTaux": 20.0,
+            "ligneTvaTauxManuel": 20.0
+          }
+        ]
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
