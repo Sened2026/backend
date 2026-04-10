@@ -130,19 +130,21 @@ export interface StoredInvoicePdfResult {
   fromStorage: boolean;
 }
 
-const PLATFORM_FALLBACK_LOGO_NAME = "SENED";
-const PLATFORM_FALLBACK_LOGO_DATA_URI = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(
-  `<svg xmlns="http://www.w3.org/2000/svg" width="180" height="180" viewBox="0 0 180 180" role="img" aria-label="${PLATFORM_FALLBACK_LOGO_NAME}">
-    <rect width="180" height="180" rx="28" fill="#0f172a" />
-    <text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="34" font-weight="700" letter-spacing="4" fill="#ffffff">${PLATFORM_FALLBACK_LOGO_NAME}</text>
-  </svg>`,
-)}`;
+const PLATFORM_FOOTER_BRAND_NAME = "Sened";
 
 @Injectable()
 export class PdfService implements OnModuleDestroy {
   private browser: puppeteer.Browser | null = null;
   private readonly logger = new Logger(PdfService.name);
   private readonly documentsBucket: string;
+  private platformFooterLogoDataUri: string | null | undefined;
+  private readonly platformFooterLogoPath = path.join(
+    __dirname,
+    "..",
+    "..",
+    "brand",
+    "SECONDAIRE_bleu.svg",
+  );
 
   constructor(private readonly configService: ConfigService) {
     this.documentsBucket = this.configService.get(
@@ -224,8 +226,43 @@ export class PdfService implements OnModuleDestroy {
     }).format(date);
   }
 
-  private resolveCompanyLogoUrl(logoUrl?: string | null): string {
-    return logoUrl?.trim() || PLATFORM_FALLBACK_LOGO_DATA_URI;
+  private resolveCompanyLogoUrl(logoUrl?: string | null): string | null {
+    const normalizedLogoUrl = logoUrl?.trim();
+    return normalizedLogoUrl ? normalizedLogoUrl : null;
+  }
+
+  private getPlatformFooterLogoDataUri(): string | null {
+    if (this.platformFooterLogoDataUri !== undefined) {
+      return this.platformFooterLogoDataUri;
+    }
+
+    try {
+      const logoSvg = fs.readFileSync(this.platformFooterLogoPath, "utf8");
+      this.platformFooterLogoDataUri = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(
+        logoSvg,
+      )}`;
+    } catch (error) {
+      this.logger.warn(
+        `Impossible de charger le logo de marque PDF depuis ${this.platformFooterLogoPath}`,
+      );
+      this.platformFooterLogoDataUri = null;
+    }
+
+    return this.platformFooterLogoDataUri;
+  }
+
+  private renderPlatformFooterBranding(): string {
+    const platformFooterLogoDataUri = this.getPlatformFooterLogoDataUri();
+
+    return `
+        <div class="footer-branding">
+            ${
+              platformFooterLogoDataUri
+                ? `<img src="${platformFooterLogoDataUri}" class="footer-branding-logo" alt="${PLATFORM_FOOTER_BRAND_NAME}">`
+                : ""
+            }
+            <span>Document généré par ${PLATFORM_FOOTER_BRAND_NAME}</span>
+        </div>`;
   }
 
   formatInvoiceForPdf(invoice: any): InvoiceData {
@@ -480,6 +517,9 @@ export class PdfService implements OnModuleDestroy {
       data.client.company_name ||
       `${data.client.first_name || ""} ${data.client.last_name || ""}`.trim();
     const companyLogoUrl = this.resolveCompanyLogoUrl(data.company.logo_url);
+    const platformFooterBranding = !companyLogoUrl
+      ? this.renderPlatformFooterBranding()
+      : "";
 
     const typeLabels: Record<string, string> = {
       standard: "FACTURE",
@@ -747,6 +787,22 @@ export class PdfService implements OnModuleDestroy {
             font-size: 8pt;
             color: #64748b;
         }
+
+        .footer-branding {
+            margin-top: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            font-size: 7pt;
+            color: #94a3b8;
+        }
+
+        .footer-branding-logo {
+            height: 12px;
+            width: auto;
+            object-fit: contain;
+        }
         
         .vat-details {
             margin-top: 10px;
@@ -793,7 +849,7 @@ export class PdfService implements OnModuleDestroy {
 <body>
     <div class="header">
         <div class="company-info">
-            <img src="${companyLogoUrl}" class="logo" alt="Logo ${data.company.name || PLATFORM_FALLBACK_LOGO_NAME}">
+            ${companyLogoUrl ? `<img src="${companyLogoUrl}" class="logo" alt="Logo ${data.company.name || "de l'entreprise"}">` : ""}
             <div class="company-name">${data.company.name}</div>
             <div class="company-details">
                 ${data.company.address ? `${data.company.address}<br>` : ""}
@@ -970,6 +1026,7 @@ export class PdfService implements OnModuleDestroy {
     <div class="footer">
         ${data.company.legal_name || data.company.name}${data.company.siren ? ` - SIREN: ${data.company.siren}` : ""}${data.company.vat_number ? ` - TVA Intracommunautaire: ${data.company.vat_number}` : ""}
         ${data.facturx_profile ? `<br>Document conforme au format Factur-X (${data.facturx_profile.toUpperCase()})` : ""}
+        ${platformFooterBranding}
     </div>
 </body>
 </html>
@@ -984,6 +1041,9 @@ export class PdfService implements OnModuleDestroy {
       data.client.company_name ||
       `${data.client.first_name || ""} ${data.client.last_name || ""}`.trim();
     const companyLogoUrl = this.resolveCompanyLogoUrl(data.company.logo_url);
+    const platformFooterBranding = !companyLogoUrl
+      ? this.renderPlatformFooterBranding()
+      : "";
 
     const vatGroups = this.groupByVatRate(data.items);
 
@@ -1244,6 +1304,22 @@ export class PdfService implements OnModuleDestroy {
             font-size: 8pt;
             color: #64748b;
         }
+
+        .footer-branding {
+            margin-top: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            font-size: 7pt;
+            color: #94a3b8;
+        }
+
+        .footer-branding-logo {
+            height: 12px;
+            width: auto;
+            object-fit: contain;
+        }
         
         .validity-notice {
             margin-top: 20px;
@@ -1265,7 +1341,7 @@ export class PdfService implements OnModuleDestroy {
 <body>
     <div class="header">
         <div class="company-info">
-            <img src="${companyLogoUrl}" class="logo" alt="Logo ${data.company.name || PLATFORM_FALLBACK_LOGO_NAME}">
+            ${companyLogoUrl ? `<img src="${companyLogoUrl}" class="logo" alt="Logo ${data.company.name || "de l'entreprise"}">` : ""}
             <div class="company-name">${data.company.name}</div>
             <div class="company-details">
                 ${data.company.address ? `${data.company.address}<br>` : ""}
@@ -1412,6 +1488,7 @@ export class PdfService implements OnModuleDestroy {
 
     <div class="footer">
         ${data.company.legal_name || data.company.name}${data.company.siren ? ` - SIREN: ${data.company.siren}` : ""}${data.company.vat_number ? ` - TVA Intracommunautaire: ${data.company.vat_number}` : ""}
+        ${platformFooterBranding}
     </div>
 </body>
 </html>

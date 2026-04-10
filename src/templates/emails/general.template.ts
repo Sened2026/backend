@@ -12,6 +12,7 @@ import {
     EmailTemplateData,
     renderGeneralEmailHeaderLogo,
     renderInviteEmailHeaderBranding,
+    appendGeneratedBySenedText,
 } from './base.template';
 
 export interface WelcomeEmailData extends EmailTemplateData {
@@ -151,7 +152,7 @@ Email de connexion : ${data.userEmail}
 L'équipe ${data.companyName}
     `;
     
-    return { subject, html: wrapTemplate(content), text };
+    return { subject, html: wrapTemplate(content), text: appendGeneratedBySenedText(text) };
 }
 
 /**
@@ -232,7 +233,7 @@ Cordialement,
 L'équipe ${data.companyName}
     `;
     
-    return { subject, html: wrapTemplate(content), text };
+    return { subject, html: wrapTemplate(content), text: appendGeneratedBySenedText(text) };
 }
 
 /**
@@ -314,7 +315,7 @@ Cordialement,
 ${data.companyName || 'L\'équipe'}
     `;
     
-    return { subject, html: wrapTemplate(content), text };
+    return { subject, html: wrapTemplate(content), text: appendGeneratedBySenedText(text) };
 }
 
 /**
@@ -384,5 +385,5 @@ Cordialement,
 L'équipe ${data.companyName || ''}
     `;
     
-    return { subject, html: wrapTemplate(content), text };
+    return { subject, html: wrapTemplate(content), text: appendGeneratedBySenedText(text) };
 }

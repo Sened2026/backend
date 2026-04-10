@@ -12,9 +12,11 @@ export interface EmailTemplateData {
     companyEmail?: string;
     companyPhone?: string;
     companySiren?: string;
+    brandAssetBaseUrl?: string;
 }
-
-const GENERAL_EMAIL_FALLBACK_NAME = 'SENED';
+const SENED_EMAIL_FOOTER_TEXT = 'Ce message a été généré par Sened';
+const SENED_TEXT_SIGNATURE = 'Généré par Sened';
+const SENED_SECONDARY_LOGO_PATH = '/brand/secondaire/SVG/SECONDAIRE_bleu.svg';
 
 export const baseStyles = `
     * {
@@ -70,20 +72,6 @@ export const baseStyles = `
         vertical-align: middle;
     }
 
-    .header-logo-fallback-cell {
-        color: #ffffff;
-        font-weight: 800;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-        line-height: 1;
-        white-space: nowrap;
-    }
-
-    .header-brand-divider-cell {
-        font-size: 0;
-        line-height: 0;
-    }
-    
     .header-title {
         color: #ffffff;
         font-size: 28px;
@@ -309,6 +297,39 @@ export const baseStyles = `
         font-size: 11px;
         color: #9ca3af;
     }
+
+    .footer-branding {
+        margin-top: 16px;
+        padding-top: 16px;
+        border-top: 1px solid #e2e8f0;
+    }
+
+    .footer-branding-table {
+        margin: 0 auto;
+        border-collapse: collapse;
+    }
+
+    .footer-branding-logo-cell {
+        padding-right: 10px;
+        vertical-align: middle;
+    }
+
+    .footer-branding-logo {
+        display: block;
+        height: 18px;
+        width: auto;
+        border: 0;
+        outline: none;
+        text-decoration: none;
+    }
+
+    .footer-branding-text {
+        color: #94a3b8;
+        font-size: 11px;
+        line-height: 1.4;
+        vertical-align: middle;
+        white-space: nowrap;
+    }
     
     .signature {
         margin-top: 24px;
@@ -345,6 +366,8 @@ export const baseStyles = `
 `;
 
 export function generateFooter(data: EmailTemplateData): string {
+    const brandLogoUrl = resolveSenedBrandLogoUrl(data.brandAssetBaseUrl);
+
     return `
     <div class="footer">
         <div class="footer-company">${data.companyName}</div>
@@ -359,6 +382,20 @@ export function generateFooter(data: EmailTemplateData): string {
             SIREN : ${data.companySiren}
         </div>
         ` : ''}
+        <div class="footer-branding">
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0" class="footer-branding-table" align="center" style="margin:0 auto; border-collapse:collapse;">
+                <tr>
+                    ${brandLogoUrl ? `
+                    <td class="footer-branding-logo-cell" valign="middle" style="padding-right:10px;">
+                        <img src="${brandLogoUrl}" alt="Sened" class="footer-branding-logo" style="display:block; height:18px; width:auto; border:0; outline:none; text-decoration:none;">
+                    </td>
+                    ` : ''}
+                    <td class="footer-branding-text" valign="middle" style="color:#94a3b8; font-size:11px; line-height:1.4; white-space:nowrap;">
+                        ${SENED_EMAIL_FOOTER_TEXT}
+                    </td>
+                </tr>
+            </table>
+        </div>
     </div>
     `;
 }
@@ -368,21 +405,14 @@ function normalizeEmailHeaderLogo(logo?: string): string | null {
     return normalizedLogo ? normalizedLogo : null;
 }
 
-function renderHeaderFallbackBadge(label: string, compact = false): string {
-    const minWidth = compact ? '96px' : '120px';
-    const minHeight = compact ? '44px' : '52px';
-    const padding = compact ? '8px 14px' : '10px 18px';
-    const borderRadius = compact ? '12px' : '14px';
-    const fontSize = compact ? '20px' : '24px';
+function normalizeBrandAssetBaseUrl(baseUrl?: string): string | null {
+    const normalizedBaseUrl = baseUrl?.trim().replace(/\/+$/, '');
+    return normalizedBaseUrl ? normalizedBaseUrl : null;
+}
 
-    return `
-    <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate;">
-        <tr>
-            <td class="header-logo-fallback-cell" align="center" valign="middle" aria-label="${label}" style="min-width:${minWidth}; min-height:${minHeight}; padding:${padding}; border-radius:${borderRadius}; background:rgba(255, 255, 255, 0.16); border:1px solid rgba(255, 255, 255, 0.28); color:#ffffff; font-size:${fontSize}; font-weight:800; letter-spacing:0.08em; text-transform:uppercase; line-height:1; white-space:nowrap;">
-                ${label}
-            </td>
-        </tr>
-    </table>`;
+function resolveSenedBrandLogoUrl(baseUrl?: string): string | null {
+    const normalizedBaseUrl = normalizeBrandAssetBaseUrl(baseUrl);
+    return normalizedBaseUrl ? `${normalizedBaseUrl}${SENED_SECONDARY_LOGO_PATH}` : null;
 }
 
 function renderHeaderLogoBox(companyLogo: string, companyName: string, compact = false): string {
@@ -403,17 +433,17 @@ function renderHeaderLogoBox(companyLogo: string, companyName: string, compact =
     </table>`;
 }
 
-export function renderEmailHeaderLogo(data: EmailTemplateData, fallbackLabel: string = GENERAL_EMAIL_FALLBACK_NAME): string {
+export function renderEmailHeaderLogo(data: EmailTemplateData): string {
     const companyLogo = normalizeEmailHeaderLogo(data.companyLogo);
-    const logoMarkup = companyLogo
-        ? renderHeaderLogoBox(companyLogo, data.companyName)
-        : renderHeaderFallbackBadge(fallbackLabel);
+    if (!companyLogo) {
+        return '';
+    }
 
     return `
     <table role="presentation" cellpadding="0" cellspacing="0" border="0" class="header-logo-table" align="center" style="margin:0 auto 16px; border-collapse:separate;">
         <tr>
             <td align="center" valign="middle">
-                ${logoMarkup}
+                ${renderHeaderLogoBox(companyLogo, data.companyName)}
             </td>
         </tr>
     </table>`;
@@ -425,37 +455,22 @@ export function renderGeneralEmailHeaderLogo(data: EmailTemplateData): string {
 
 export function renderInviteEmailHeaderBranding(data: EmailTemplateData): string {
     const companyLogo = normalizeEmailHeaderLogo(data.companyLogo);
-    const platformBrand = renderHeaderFallbackBadge(GENERAL_EMAIL_FALLBACK_NAME, true);
-
     if (!companyLogo) {
-        return `
-        <table role="presentation" cellpadding="0" cellspacing="0" border="0" class="header-branding-table" align="center" style="margin:0 auto 16px; border-collapse:separate;">
-            <tr>
-                <td align="center" valign="middle">
-                    ${platformBrand}
-                </td>
-            </tr>
-        </table>`;
+        return '';
     }
 
     return `
     <table role="presentation" cellpadding="0" cellspacing="0" border="0" class="header-branding-table" align="center" style="margin:0 auto 16px; border-collapse:separate;">
         <tr>
             <td align="center" valign="middle">
-                ${platformBrand}
-            </td>
-            <td class="header-brand-divider-cell" align="center" valign="middle" style="padding:0 12px;">
-                <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
-                    <tr>
-                        <td style="width:1px; height:32px; background:rgba(255, 255, 255, 0.28); font-size:0; line-height:0;">&nbsp;</td>
-                    </tr>
-                </table>
-            </td>
-            <td align="center" valign="middle">
                 ${renderHeaderLogoBox(companyLogo, data.companyName, true)}
             </td>
         </tr>
     </table>`;
+}
+
+export function appendGeneratedBySenedText(text: string): string {
+    return `${text.trimEnd()}\n\n${SENED_TEXT_SIGNATURE}`;
 }
 
 export function wrapTemplate(content: string, styles: string = baseStyles): string {

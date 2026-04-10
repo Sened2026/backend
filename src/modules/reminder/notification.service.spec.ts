@@ -108,7 +108,7 @@ describe("NotificationService email rendering", () => {
     );
   });
 
-  it("renders SENED fallback only in invite emails without a company logo", async () => {
+  it("renders no header branding in invite emails without a company logo", async () => {
     await service.sendInviteEmail(
       "invitee@example.com",
       "Alice Martin",
@@ -131,16 +131,19 @@ describe("NotificationService email rendering", () => {
         subject: "Invitation à rejoindre SENED",
       }),
     );
-    expect(sentEmail?.html).toContain("header-branding-table");
-    expect(sentEmail?.html).toContain('aria-label="SENED"');
+    expect(sentEmail?.html).not.toContain('class="header-branding-table"');
+    expect(sentEmail?.html).not.toContain('class="header-logo-table"');
     expect(sentEmail?.html).not.toContain(
       'class="header-logo-cell header-company-logo-cell"',
     );
-    expect(sentEmail?.html).not.toContain('header-brand-divider-cell"');
-    expect(sentEmail?.html).not.toContain("<img src=");
+    expect(sentEmail?.html).not.toContain("header-brand-divider-cell");
+    expect(sentEmail?.html).toContain(
+      "https://app.example.com/brand/secondaire/SVG/SECONDAIRE_bleu.svg",
+    );
+    expect(sentEmail?.html).toContain("Ce message a été généré par Sened");
   });
 
-  it("renders SENED and the inviter company logo in invite emails when available", async () => {
+  it("renders only the inviter company logo in invite emails when available", async () => {
     await service.sendInviteEmail(
       "invitee@example.com",
       "Alice Martin",
@@ -165,10 +168,14 @@ describe("NotificationService email rendering", () => {
       }),
     );
     expect(sentEmail?.html).toContain("header-branding-table");
-    expect(sentEmail?.html).toContain('aria-label="SENED"');
     expect(sentEmail?.html).toContain("https://cdn.example.com/acme-logo.png");
-    expect(sentEmail?.html).toContain("header-brand-divider-cell");
     expect(sentEmail?.html).toContain("header-company-logo-cell");
+    expect(sentEmail?.html).not.toContain("header-brand-divider-cell");
+    expect(sentEmail?.html).not.toContain('aria-label="SENED"');
+    expect(sentEmail?.html).toContain(
+      "https://app.example.com/brand/secondaire/SVG/SECONDAIRE_bleu.svg",
+    );
+    expect(sentEmail?.html).toContain("Ce message a été généré par Sened");
   });
 
   it("renders merchant admin invite emails with the administrator label and register URL", async () => {
@@ -229,7 +236,7 @@ describe("NotificationService email rendering", () => {
     );
   });
 
-  it("renders the shared fallback header in welcome emails without a company logo", async () => {
+  it("renders no shared header logo in welcome emails without a company logo", async () => {
     await service.sendWelcomeEmail(
       {
         email: "user@example.com",
@@ -243,8 +250,12 @@ describe("NotificationService email rendering", () => {
 
     const sentEmail = jest.mocked(service.sendEmail).mock.calls[0]?.[0];
 
-    expect(sentEmail?.html).toContain("header-logo-table");
-    expect(sentEmail?.html).toContain("header-logo-fallback-cell");
-    expect(sentEmail?.html).toContain('aria-label="SENED"');
+    expect(sentEmail?.html).not.toContain('class="header-logo-table"');
+    expect(sentEmail?.html).not.toContain('class="header-logo-fallback-cell"');
+    expect(sentEmail?.html).not.toContain('aria-label="SENED"');
+    expect(sentEmail?.html).toContain(
+      "https://app.example.com/brand/secondaire/SVG/SECONDAIRE_bleu.svg",
+    );
+    expect(sentEmail?.html).toContain("Ce message a été généré par Sened");
   });
 });

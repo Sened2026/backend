@@ -122,7 +122,7 @@ export class AuthService {
         // Vérifier si l'utilisateur a été invité et forcer le rôle de l'invitation
         const { data: invitation } = await supabase
             .from('company_invitations')
-            .select('role, company_id, invited_by')
+            .select('role, company_id, invited_by, invitation_type')
             .eq('email', email.toLowerCase())
             .not('accepted_at', 'is', null)
             .order('accepted_at', { ascending: false })
@@ -253,7 +253,11 @@ export class AuthService {
             // Si non trouvé, on ignore silencieusement
         }
 
-        if (invitation?.company_id && invitation?.invited_by) {
+        if (
+            invitation?.company_id
+            && invitation?.invited_by
+            && invitation?.invitation_type !== 'merchant_signup'
+        ) {
             await this.companyService.acceptNewClientInvitationLinkRequest(
                 invitation.company_id,
                 invitation.invited_by,

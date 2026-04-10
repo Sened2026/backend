@@ -12,6 +12,7 @@ import {
     CreateSubscriptionDto,
     CreateRegistrationSubscriptionDto,
     FinalizeRegistrationSubscriptionDto,
+    ValidateRegistrationPromotionCodeDto,
 } from './dto/subscription.dto';
 import { Request } from 'express';
 
@@ -76,6 +77,13 @@ export class SubscriptionController {
         @Body() dto: CreateRegistrationSubscriptionDto,
     ) {
         return this.subscriptionService.createRegistrationSubscription(dto);
+    }
+
+    @Post('registration/promo/validate')
+    async validateRegistrationPromotionCode(
+        @Body() dto: ValidateRegistrationPromotionCodeDto,
+    ) {
+        return this.subscriptionService.validateRegistrationPromotionCode(dto);
     }
 
     @Post('registration/finalize')

@@ -17,6 +17,9 @@ import {
     CreateRegistrationSubscriptionDto,
     RegistrationSubscriptionResponseDto,
     FinalizeRegistrationSubscriptionResponseDto,
+    RegistrationPricingDto,
+    ValidateRegistrationPromotionCodeDto,
+    ValidateRegistrationPromotionCodeResponseDto,
 } from './dto/subscription.dto';
 import { decryptRegistrationSecret, encryptRegistrationSecret } from '../../common/utils/registration-payload';
 import { normalizeBusinessIdentifiers } from '../../shared/utils/business-identifiers.util';
@@ -40,6 +43,14 @@ interface RegistrationPaymentSessionRecord {
     expires_at: string;
     created_at: string;
     updated_at: string;
+}
+
+interface ResolvedRegistrationPricingContext {
+    plan: any;
+    basePriceId: string;
+    basePrice: Stripe.Price;
+    pricing: RegistrationPricingDto;
+    stripePromotionCodeId: string | null;
 }
 
 interface SubscriptionMemberUsage {
@@ -108,6 +119,14 @@ export class SubscriptionService {
         stripe: Stripe,
         lookupKey: string,
     ): Promise<string> {
+        const price = await this.resolveStripePrice(stripe, lookupKey);
+        return price.id;
+    }
+
+    private async resolveStripePrice(
+        stripe: Stripe,
+        lookupKey: string,
+    ): Promise<Stripe.Price> {
         const prices = await stripe.prices.list({
             lookup_keys: [lookupKey],
             active: true,
@@ -126,7 +145,7 @@ export class SubscriptionService {
             );
         }
 
-        return prices.data[0].id;
+        return prices.data[0];
     }
 
     /**
@@ -148,6 +167,69 @@ export class SubscriptionService {
 
     private normalizeEmail(email: string): string {
         return email.trim().toLowerCase();
+    }
+
+    private normalizePromotionCode(code?: string | null): string | null {
+        const trimmed = code?.trim();
+        return trimmed ? trimmed : null;
+    }
+
+    private convertStripeAmountToMajor(amount: number | null | undefined): number {
+        return Number((((amount || 0) as number) / 100).toFixed(2));
+    }
+
+    private buildRegistrationPricing(
+        amountMinor: number,
+        discountMinor: number,
+        currency: string,
+        options?: {
+            promotionCode?: string | null;
+            couponName?: string | null;
+            couponPercentOff?: number | null;
+            couponAmountOff?: number | null;
+        },
+    ): RegistrationPricingDto {
+        const normalizedDiscount = Math.max(0, Math.min(discountMinor, amountMinor));
+        return {
+            original_amount_ht: this.convertStripeAmountToMajor(amountMinor),
+            discount_amount_ht: this.convertStripeAmountToMajor(normalizedDiscount),
+            final_amount_ht: this.convertStripeAmountToMajor(amountMinor - normalizedDiscount),
+            currency: currency.toUpperCase(),
+            promotion_code: options?.promotionCode || null,
+            coupon_name: options?.couponName || null,
+            coupon_percent_off: options?.couponPercentOff ?? null,
+            coupon_amount_off: options?.couponAmountOff != null
+                ? this.convertStripeAmountToMajor(options.couponAmountOff)
+                : null,
+        };
+    }
+
+    private buildRegistrationPricingFromInvoice(
+        invoice: Stripe.Invoice | null,
+        fallbackPricing: RegistrationPricingDto,
+    ): RegistrationPricingDto {
+        if (!invoice) {
+            return fallbackPricing;
+        }
+
+        const subtotal = typeof invoice.subtotal === 'number'
+            ? invoice.subtotal
+            : Math.round(fallbackPricing.original_amount_ht * 100);
+        const discountAmount = Array.isArray(invoice.total_discount_amounts)
+            ? invoice.total_discount_amounts.reduce(
+                (sum, item) => sum + (item?.amount || 0),
+                0,
+            )
+            : Math.round(fallbackPricing.discount_amount_ht * 100);
+
+        return {
+            ...fallbackPricing,
+            original_amount_ht: this.convertStripeAmountToMajor(subtotal),
+            discount_amount_ht: this.convertStripeAmountToMajor(discountAmount),
+            final_amount_ht: this.convertStripeAmountToMajor(
+                Math.max(subtotal - discountAmount, 0),
+            ),
+        };
     }
 
     private mapStripeStatus(status: string | null | undefined): string {
@@ -422,7 +504,212 @@ export class SubscriptionService {
             role: dto.role,
             accountant_siren: dto.accountant_siren || null,
             plan_slug: dto.plan_slug,
+            promotion_code: this.normalizePromotionCode(dto.promotion_code),
             platform_legal_accepted_at: dto.platform_legal_accepted_at,
+        };
+    }
+
+    private async loadPromotionCoupon(
+        stripe: Stripe,
+        promotionCode: any,
+    ): Promise<any> {
+        const couponRef = promotionCode?.coupon ?? promotionCode?.promotion?.coupon;
+        if (!couponRef) {
+            throw new BadRequestException('Ce code promo ne peut pas être appliqué.');
+        }
+
+        if (typeof couponRef !== 'string') {
+            return couponRef;
+        }
+
+        return stripe.coupons.retrieve(couponRef);
+    }
+
+    private ensurePromotionCodeStillValid(
+        promotionCode: any,
+        coupon: any,
+        amountMinor: number,
+        currency: string,
+        productId: string | null,
+    ): void {
+        if (!promotionCode?.active) {
+            throw new BadRequestException('Ce code promo est invalide ou expiré.');
+        }
+
+        if (promotionCode?.expires_at && promotionCode.expires_at * 1000 < Date.now()) {
+            throw new BadRequestException('Ce code promo a expiré.');
+        }
+
+        if (
+            promotionCode?.max_redemptions != null
+            && promotionCode?.times_redeemed != null
+            && promotionCode.times_redeemed >= promotionCode.max_redemptions
+        ) {
+            throw new BadRequestException('Ce code promo a déjà atteint sa limite d’utilisation.');
+        }
+
+        if (promotionCode?.customer) {
+            throw new BadRequestException('Ce code promo ne peut pas être utilisé pour cette inscription.');
+        }
+
+        if (coupon?.valid === false) {
+            throw new BadRequestException('Ce code promo est invalide ou expiré.');
+        }
+
+        if (coupon?.redeem_by && coupon.redeem_by * 1000 < Date.now()) {
+            throw new BadRequestException('Ce code promo a expiré.');
+        }
+
+        const minimumAmount = promotionCode?.restrictions?.minimum_amount;
+        const minimumAmountCurrency = promotionCode?.restrictions?.minimum_amount_currency;
+        if (
+            typeof minimumAmount === 'number'
+            && amountMinor < minimumAmount
+            && (!minimumAmountCurrency || minimumAmountCurrency.toLowerCase() === currency.toLowerCase())
+        ) {
+            throw new BadRequestException('Ce code promo ne s’applique pas à ce plan.');
+        }
+
+        const couponCurrency = coupon?.currency;
+        if (
+            typeof coupon?.amount_off === 'number'
+            && couponCurrency
+            && couponCurrency.toLowerCase() !== currency.toLowerCase()
+        ) {
+            throw new BadRequestException('Ce code promo ne s’applique pas à ce plan.');
+        }
+
+        const allowedProducts = coupon?.applies_to?.products;
+        if (
+            Array.isArray(allowedProducts)
+            && allowedProducts.length > 0
+            && productId
+            && !allowedProducts.includes(productId)
+        ) {
+            throw new BadRequestException('Ce code promo ne s’applique pas à ce plan.');
+        }
+    }
+
+    private computeDiscountAmountMinor(
+        coupon: any,
+        originalAmountMinor: number,
+    ): number {
+        if (typeof coupon?.amount_off === 'number') {
+            return Math.max(0, Math.min(originalAmountMinor, coupon.amount_off));
+        }
+
+        if (typeof coupon?.percent_off === 'number') {
+            return Math.max(
+                0,
+                Math.min(
+                    originalAmountMinor,
+                    Math.round((originalAmountMinor * coupon.percent_off) / 100),
+                ),
+            );
+        }
+
+        return 0;
+    }
+
+    private async resolveRegistrationPricingContext(
+        planSlug: string,
+        billingPeriod: 'monthly' | 'yearly',
+        promotionCodeInput?: string | null,
+    ): Promise<ResolvedRegistrationPricingContext> {
+        const supabase = getSupabaseAdmin();
+        const stripe = this.ensureStripe();
+
+        const { data: plan, error: planError } = await supabase
+            .from('subscription_plans')
+            .select('*')
+            .eq('slug', planSlug)
+            .eq('is_active', true)
+            .single();
+
+        if (planError || !plan) {
+            throw new NotFoundException(`Plan "${planSlug}" non trouvé`);
+        }
+
+        if (Number(plan.price_monthly || 0) === 0 && Number(plan.price_yearly || 0) === 0) {
+            throw new BadRequestException('Ce plan ne nécessite pas de paiement.');
+        }
+
+        const baseLookupKey = this.resolveLookupKey(plan, billingPeriod);
+        const basePrice = await this.resolveStripePrice(stripe, baseLookupKey);
+
+        if (typeof basePrice.unit_amount !== 'number') {
+            throw new BadRequestException(
+                'Le tarif Stripe de cet abonnement est incomplet. Vérifiez la configuration de facturation.',
+            );
+        }
+
+        const normalizedPromotionCode = this.normalizePromotionCode(promotionCodeInput);
+        if (!normalizedPromotionCode) {
+            return {
+                plan,
+                basePriceId: basePrice.id,
+                basePrice,
+                pricing: this.buildRegistrationPricing(
+                    basePrice.unit_amount,
+                    0,
+                    basePrice.currency,
+                ),
+                stripePromotionCodeId: null,
+            };
+        }
+
+        const promotionCodes = await stripe.promotionCodes.list({
+            code: normalizedPromotionCode,
+            active: true,
+            limit: 10,
+        });
+
+        const matchedPromotionCode = promotionCodes.data.find(
+            (promotionCode) =>
+                promotionCode.code?.trim().toLowerCase()
+                === normalizedPromotionCode.toLowerCase(),
+        );
+
+        if (!matchedPromotionCode) {
+            throw new BadRequestException(
+                'Ce code promo est introuvable dans l’environnement Stripe configuré sur ce serveur. Vérifiez qu’il a été créé sur le même compte et dans le même mode (test/live).',
+            );
+        }
+
+        const coupon = await this.loadPromotionCoupon(stripe, matchedPromotionCode);
+        const productId = typeof basePrice.product === 'string'
+            ? basePrice.product
+            : basePrice.product?.id || null;
+
+        this.ensurePromotionCodeStillValid(
+            matchedPromotionCode,
+            coupon,
+            basePrice.unit_amount,
+            basePrice.currency,
+            productId,
+        );
+
+        const discountAmountMinor = this.computeDiscountAmountMinor(
+            coupon,
+            basePrice.unit_amount,
+        );
+
+        return {
+            plan,
+            basePriceId: basePrice.id,
+            basePrice,
+            pricing: this.buildRegistrationPricing(
+                basePrice.unit_amount,
+                discountAmountMinor,
+                basePrice.currency,
+                {
+                    promotionCode: matchedPromotionCode.code || normalizedPromotionCode,
+                    couponName: coupon?.name || null,
+                    couponPercentOff: coupon?.percent_off ?? null,
+                    couponAmountOff: coupon?.amount_off ?? null,
+                },
+            ),
+            stripePromotionCodeId: matchedPromotionCode.id,
         };
     }
 
@@ -968,27 +1255,17 @@ export class SubscriptionService {
         );
         await this.cancelExistingRegistrationSessions(supabase, normalizedEmail);
 
-        const { data: plan, error: planError } = await supabase
-            .from('subscription_plans')
-            .select('*')
-            .eq('slug', dto.plan_slug)
-            .eq('is_active', true)
-            .single();
-
-        if (planError || !plan) {
-            throw new NotFoundException(`Plan "${dto.plan_slug}" non trouvé`);
-        }
-
-        if (Number(plan.price_monthly || 0) === 0 && Number(plan.price_yearly || 0) === 0) {
-            throw new BadRequestException('Ce plan ne nécessite pas de paiement.');
-        }
-
-        const baseLookupKey = this.resolveLookupKey(plan, dto.billing_period);
-        const basePriceId = await this.resolveStripePriceId(stripe, baseLookupKey);
+        const pricingContext = await this.resolveRegistrationPricingContext(
+            dto.plan_slug,
+            dto.billing_period,
+            dto.promotion_code,
+        );
+        const plan = pricingContext.plan;
 
         const registrationData = this.buildRegistrationMetadata({
             ...dto,
             email: normalizedEmail,
+            promotion_code: pricingContext.pricing.promotion_code || undefined,
         });
 
         const { data: createdSession, error: sessionError } = await supabase
@@ -1021,13 +1298,16 @@ export class SubscriptionService {
 
         const stripeSubscription = await stripe.subscriptions.create({
             customer: customer.id,
-            items: [{ price: basePriceId, quantity: 1 }],
+            items: [{ price: pricingContext.basePriceId, quantity: 1 }],
             billing_mode: { type: 'flexible' },
             payment_behavior: 'default_incomplete',
             payment_settings: {
                 save_default_payment_method: 'on_subscription',
                 payment_method_types: ['card', 'sepa_debit'],
             },
+            discounts: pricingContext.stripePromotionCodeId
+                ? [{ promotion_code: pricingContext.stripePromotionCodeId }]
+                : undefined,
             metadata: {
                 registration_session_id: createdSession.id,
                 registration_flow: 'true',
@@ -1044,6 +1324,10 @@ export class SubscriptionService {
             | null;
         const paymentIntent = (latestInvoice as any)?.payment_intent as Stripe.PaymentIntent | null;
         const clientSecret = confirmationSecret?.client_secret || paymentIntent?.client_secret || null;
+        const appliedPricing = this.buildRegistrationPricingFromInvoice(
+            latestInvoice,
+            pricingContext.pricing,
+        );
 
         if (!clientSecret) {
             throw new BadRequestException(
@@ -1071,6 +1355,27 @@ export class SubscriptionService {
             subscription_id: stripeSubscription.id,
             client_secret: clientSecret,
             status: stripeSubscription.status,
+            pricing: appliedPricing,
+        };
+    }
+
+    async validateRegistrationPromotionCode(
+        dto: ValidateRegistrationPromotionCodeDto,
+    ): Promise<ValidateRegistrationPromotionCodeResponseDto> {
+        if (!this.isStripeEnabled()) {
+            throw new BadRequestException(
+                'Le paiement est temporairement indisponible. Réessayez dans quelques instants.',
+            );
+        }
+
+        const pricingContext = await this.resolveRegistrationPricingContext(
+            dto.plan_slug,
+            dto.billing_period,
+            dto.promotion_code,
+        );
+
+        return {
+            pricing: pricingContext.pricing,
         };
     }
 

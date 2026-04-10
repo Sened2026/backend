@@ -6,7 +6,7 @@
  * - Remboursement
  */
 
-import { baseStyles, generateFooter, wrapTemplate, EmailTemplateData, renderEmailHeaderLogo } from './base.template';
+import { baseStyles, generateFooter, wrapTemplate, EmailTemplateData, renderEmailHeaderLogo, appendGeneratedBySenedText } from './base.template';
 
 export interface PaymentEmailData extends EmailTemplateData {
     clientName: string;
@@ -133,7 +133,7 @@ Merci pour votre confiance !
 ${data.companyName}
     `;
     
-    return { subject, html: wrapTemplate(content), text };
+    return { subject, html: wrapTemplate(content), text: appendGeneratedBySenedText(text) };
 }
 
 /**
@@ -222,7 +222,7 @@ Cordialement,
 ${data.companyName}
     `;
     
-    return { subject, html: wrapTemplate(content), text };
+    return { subject, html: wrapTemplate(content), text: appendGeneratedBySenedText(text) };
 }
 
 /**
@@ -310,7 +310,7 @@ Cordialement,
 ${data.companyName}
     `;
     
-    return { subject, html: wrapTemplate(content), text };
+    return { subject, html: wrapTemplate(content), text: appendGeneratedBySenedText(text) };
 }
 
 /**
@@ -397,7 +397,7 @@ Cordialement,
 ${data.companyName}
     `;
     
-    return { subject, html: wrapTemplate(content), text };
+    return { subject, html: wrapTemplate(content), text: appendGeneratedBySenedText(text) };
 }
 
 /**
@@ -492,5 +492,5 @@ Cordialement,
 ${data.companyName}
     `;
     
-    return { subject, html: wrapTemplate(content), text };
+    return { subject, html: wrapTemplate(content), text: appendGeneratedBySenedText(text) };
 }

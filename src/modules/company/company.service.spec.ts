@@ -24,6 +24,14 @@ function createInviteSupabaseMock(options?: { existingUserId?: string }) {
     email: string;
     role: CompanyRole;
     invited_by: string;
+    invitation_type?: string;
+    signup_company_name?: string | null;
+    signup_siren?: string | null;
+    signup_siret?: string | null;
+    signup_address?: string | null;
+    signup_postal_code?: string | null;
+    signup_city?: string | null;
+    signup_country?: string | null;
   } | null = null;
 
   return {
@@ -483,7 +491,7 @@ describe("CompanyService member management permissions", () => {
     );
   });
 
-  it("invites a new merchant admin by creating a provisional merchant company and a pending link request", async () => {
+  it("invites a new merchant admin with a merchant signup invitation and no provisional company", async () => {
     const inviteMock = createInviteSupabaseMock();
 
     jest.mocked(getSupabaseAdmin).mockReturnValue(inviteMock.supabase as any);
@@ -491,22 +499,6 @@ describe("CompanyService member management permissions", () => {
     jest
       .spyOn(service as any, "findExistingMerchantCompanyForInvite")
       .mockResolvedValue(null);
-    const createPendingCompanySpy = jest
-      .spyOn(service as any, "createPendingMerchantCompanyForCabinetInvite")
-      .mockResolvedValue({ id: "client-2" });
-    const createLinkRequestSpy = jest
-      .spyOn(service as any, "createAccountantLinkRequestRecord")
-      .mockResolvedValue({
-        id: "request-1",
-        accountant_company_id: "cabinet-1",
-        merchant_company_id: "client-2",
-        request_origin: "new_client_invitation",
-        requested_by: "user-1",
-        status: "pending",
-        created_at: "2026-04-10T09:00:00.000Z",
-        responded_at: null,
-        responded_by: null,
-      });
 
     const result = await service.inviteNewMerchantAdmin("user-1", "cabinet-1", {
       email: "merchant-admin@example.com",
@@ -521,33 +513,22 @@ describe("CompanyService member management permissions", () => {
 
     expect(result).toEqual({
       status: "invited",
-      client_company_id: "client-2",
       invitation_id: "invite-1",
       email: "merchant-admin@example.com",
     });
-    expect(createPendingCompanySpy).toHaveBeenCalledWith(
-      "user-1",
-      expect.objectContaining({
-        name: "Nouveau Marchand",
-        legal_name: "Nouveau Marchand",
-        siren: "123456789",
-        address: "1 rue Exemple",
-        postal_code: "75001",
-        city: "Paris",
-        country: "FR",
-      }),
-    );
-    expect(createLinkRequestSpy).toHaveBeenCalledWith(
-      "user-1",
-      "cabinet-1",
-      "client-2",
-      "new_client_invitation",
-    );
     expect(inviteMock.getInsertedPayload()).toMatchObject({
-      company_id: "client-2",
+      company_id: "cabinet-1",
       email: "merchant-admin@example.com",
       role: "merchant_admin",
       invited_by: "user-1",
+      invitation_type: "merchant_signup",
+      signup_company_name: "Nouveau Marchand",
+      signup_siren: "123456789",
+      signup_siret: "12345678900012",
+      signup_address: "1 rue Exemple",
+      signup_postal_code: "75001",
+      signup_city: "Paris",
+      signup_country: "FR",
     });
     expect(notificationService.sendInviteEmail).toHaveBeenCalledWith(
       "merchant-admin@example.com",
@@ -565,11 +546,7 @@ describe("CompanyService member management permissions", () => {
       .mocked(getSupabaseAdmin)
       .mockReturnValue(createExistingMerchantSupabaseMock() as any);
     mockUserRole("accountant");
-    const createPendingCompanySpy = jest.spyOn(
-      service as any,
-      "createPendingMerchantCompanyForCabinetInvite",
-    );
-    const inviteSpy = jest.spyOn(service as any, "createCompanyInvitation");
+    const inviteSpy = jest.spyOn(service as any, "createMerchantSignupInvitation");
 
     const result = await service.inviteNewMerchantAdmin("user-1", "cabinet-1", {
       email: "merchant-admin@example.com",
@@ -585,7 +562,6 @@ describe("CompanyService member management permissions", () => {
         siren: "123456789",
       },
     });
-    expect(createPendingCompanySpy).not.toHaveBeenCalled();
     expect(inviteSpy).not.toHaveBeenCalled();
   });
 
@@ -670,19 +646,21 @@ describe("CompanyService member management permissions", () => {
             select: jest.fn(() => ({
               eq: jest.fn().mockReturnValue({
                 eq: jest.fn().mockReturnValue({
-                  is: jest.fn().mockReturnValue({
-                    gt: jest.fn().mockReturnValue({
-                      order: jest.fn().mockResolvedValue({
-                        data: [
-                          {
-                            id: "invite-1",
-                            email: "merchant-admin@example.com",
-                            role: "merchant_admin",
-                            created_at: "2026-04-10T09:00:00.000Z",
-                            expires_at: "2026-04-17T09:00:00.000Z",
-                          },
-                        ],
-                        error: null,
+                  eq: jest.fn().mockReturnValue({
+                    is: jest.fn().mockReturnValue({
+                      gt: jest.fn().mockReturnValue({
+                        order: jest.fn().mockResolvedValue({
+                          data: [
+                            {
+                              id: "invite-1",
+                              email: "merchant-admin@example.com",
+                              role: "merchant_admin",
+                              created_at: "2026-04-10T09:00:00.000Z",
+                              expires_at: "2026-04-17T09:00:00.000Z",
+                            },
+                          ],
+                          error: null,
+                        }),
                       }),
                     }),
                   }),
@@ -1025,6 +1003,76 @@ describe("CompanyService member management permissions", () => {
         inviter_name: "Jane Doe",
         invited_firm_name: "Cabinet Test",
         invited_firm_siren: "123456789",
+      },
+    );
+  });
+
+  it("includes merchant signup draft data when validating a merchant signup invitation", async () => {
+    jest.mocked(getSupabaseAdmin).mockReturnValue({
+      from: jest.fn((table: string) => {
+        if (table === "company_invitations") {
+          return {
+            select: jest.fn(() => ({
+              eq: jest.fn().mockReturnValue({
+                is: jest.fn().mockReturnValue({
+                  gt: jest.fn().mockReturnValue({
+                    maybeSingle: jest.fn().mockResolvedValue({
+                      data: {
+                        company_id: "cabinet-1",
+                        email: "merchant@example.com",
+                        role: "merchant_admin",
+                        invitation_type: "merchant_signup",
+                        expires_at: "2026-04-15T10:00:00.000Z",
+                        invited_by: "user-1",
+                        signup_company_name: "Marchand Test",
+                        signup_siren: "123456789",
+                        signup_siret: "12345678900012",
+                        signup_address: "1 rue Exemple",
+                        signup_postal_code: "75001",
+                        signup_city: "Paris",
+                        signup_country: "FR",
+                        company: { name: "Cabinet Test" },
+                      },
+                      error: null,
+                    }),
+                  }),
+                }),
+              }),
+            })),
+          };
+        }
+
+        if (table === "profiles") {
+          return {
+            select: jest.fn(() => ({
+              eq: jest.fn().mockReturnValue({
+                maybeSingle: jest.fn().mockResolvedValue({
+                  data: { first_name: "Jane", last_name: "Doe" },
+                }),
+              }),
+            })),
+          };
+        }
+
+        throw new Error(`Unexpected table: ${table}`);
+      }),
+    } as any);
+
+    await expect(service.validateInviteToken("token-1")).resolves.toMatchObject(
+      {
+        company_id: "cabinet-1",
+        email: "merchant@example.com",
+        role: "merchant_admin",
+        invitation_type: "merchant_signup",
+        company_name: "Cabinet Test",
+        inviter_name: "Jane Doe",
+        signup_company_name: "Marchand Test",
+        signup_siren: "123456789",
+        signup_siret: "12345678900012",
+        signup_address: "1 rue Exemple",
+        signup_postal_code: "75001",
+        signup_city: "Paris",
+        signup_country: "FR",
       },
     );
   });

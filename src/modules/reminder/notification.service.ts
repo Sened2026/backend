@@ -4,6 +4,7 @@ import { Resend } from 'resend';
 import { Twilio } from 'twilio';
 import { EmailData, SmsData, SendResult } from './dto/reminder.dto';
 import { templates } from '../../templates/emails';
+import { appendGeneratedBySenedText } from '../../templates/emails/base.template';
 import { ROLE_LABELS, CompanyRole } from '../../common/roles/roles';
 import { buildQuotePublicUrls } from '../quote/quote-links.util';
 
@@ -34,6 +35,10 @@ export class NotificationService {
         return this.configService.get('FRONTEND_URL') || 'http://localhost:5173';
     }
 
+    private getBrandAssetBaseUrl(): string {
+        return this.getFrontendUrl().replace(/\/+$/, '');
+    }
+
     private getQuotePublicUrls(quote: any) {
         return buildQuotePublicUrls({
             frontendUrl: this.getFrontendUrl(),
@@ -48,6 +53,37 @@ export class NotificationService {
         .copy { text-align: justify; text-justify: inter-word; }
         .copy-muted { text-align: justify; text-justify: inter-word; color: #6b7280; font-size: 13px; }
         `;
+    }
+
+    private withEmailBranding<T extends Record<string, any>>(data: T): T & { brandAssetBaseUrl: string } {
+        return {
+            ...data,
+            brandAssetBaseUrl: this.getBrandAssetBaseUrl(),
+        };
+    }
+
+    private renderLegacyEmailFooter(company: any): string {
+        const brandLogoUrl = `${this.getBrandAssetBaseUrl()}/brand/secondaire/SVG/SECONDAIRE_bleu.svg`;
+
+        return `
+        <div class="footer">
+            <p>${company.name}${company.address ? ' - ' + company.address : ''}${company.city ? ', ' + company.postal_code + ' ' + company.city : ''}</p>
+            ${company.email ? `<p>Email : ${company.email}</p>` : ''}
+            ${company.phone ? `<p>Tél : ${company.phone}</p>` : ''}
+            ${company.siren ? `<p>SIREN : ${company.siren}</p>` : ''}
+            <div style="margin-top:16px; padding-top:16px; border-top:1px solid #e5e7eb;">
+                <table role="presentation" cellpadding="0" cellspacing="0" border="0" align="center" style="margin:0 auto; border-collapse:collapse;">
+                    <tr>
+                        <td valign="middle" style="padding-right:10px;">
+                            <img src="${brandLogoUrl}" alt="Sened" style="display:block; height:18px; width:auto; border:0; outline:none; text-decoration:none;">
+                        </td>
+                        <td valign="middle" style="font-size:11px; line-height:1.4; color:#94a3b8; white-space:nowrap;">
+                            Ce message a été généré par Sened
+                        </td>
+                    </tr>
+                </table>
+            </div>
+        </div>`;
     }
 
     /**
@@ -235,11 +271,7 @@ export class NotificationService {
             
             <p>Cordialement,<br>${company.name}</p>
         </div>
-        <div class="footer">
-            <p>${company.name}${company.address ? ' - ' + company.address : ''}${company.city ? ', ' + company.postal_code + ' ' + company.city : ''}</p>
-            ${company.email ? `<p>Email : ${company.email}</p>` : ''}
-            ${company.phone ? `<p>Tél : ${company.phone}</p>` : ''}
-        </div>
+        ${this.renderLegacyEmailFooter(company)}
     </div>
 </body>
 </html>`;
@@ -267,7 +299,7 @@ Cordialement,
 ${company.name}
 `;
 
-        return { subject, html, text };
+        return { subject, html, text: appendGeneratedBySenedText(text) };
     }
 
     /**
@@ -348,11 +380,7 @@ ${company.name}
             
             <p>Cordialement,<br>${company.name}</p>
         </div>
-        <div class="footer">
-            <p>${company.name}${company.address ? ' - ' + company.address : ''}${company.city ? ', ' + company.postal_code + ' ' + company.city : ''}</p>
-            ${company.email ? `<p>Email : ${company.email}</p>` : ''}
-            ${company.phone ? `<p>Tél : ${company.phone}</p>` : ''}
-        </div>
+        ${this.renderLegacyEmailFooter(company)}
     </div>
 </body>
 </html>`;
@@ -377,7 +405,7 @@ Cordialement,
 ${company.name}
 `;
 
-        return { subject, html, text };
+        return { subject, html, text: appendGeneratedBySenedText(text) };
     }
 
     /**
@@ -460,12 +488,7 @@ ${company.name}
             
             <p>Cordialement,<br><strong>${company.name}</strong></p>
         </div>
-        <div class="footer">
-            <p>${company.name}${company.address ? ' - ' + company.address : ''}${company.city ? ', ' + company.postal_code + ' ' + company.city : ''}</p>
-            ${company.email ? `<p>Email : ${company.email}</p>` : ''}
-            ${company.phone ? `<p>Tél : ${company.phone}</p>` : ''}
-            ${company.siren ? `<p>SIREN : ${company.siren}</p>` : ''}
-        </div>
+        ${this.renderLegacyEmailFooter(company)}
     </div>
 </body>
 </html>`;
@@ -499,7 +522,7 @@ ${company.name}
             to: client.email,
             subject,
             html,
-            text,
+            text: appendGeneratedBySenedText(text),
             replyTo: company.email,
             attachments,
         });
@@ -584,12 +607,7 @@ ${company.name}
             
             <p>Cordialement,<br><strong>${company.name}</strong></p>
         </div>
-        <div class="footer">
-            <p>${company.name}${company.address ? ' - ' + company.address : ''}${company.city ? ', ' + company.postal_code + ' ' + company.city : ''}</p>
-            ${company.email ? `<p>Email : ${company.email}</p>` : ''}
-            ${company.phone ? `<p>Tél : ${company.phone}</p>` : ''}
-            ${company.siren ? `<p>SIREN : ${company.siren}</p>` : ''}
-        </div>
+        ${this.renderLegacyEmailFooter(company)}
     </div>
 </body>
 </html>`;
@@ -625,7 +643,7 @@ ${company.name}
             to: client.email,
             subject,
             html,
-            text,
+            text: appendGeneratedBySenedText(text),
             replyTo: company.email,
             attachments,
         });
@@ -647,7 +665,7 @@ ${company.name}
     ): Promise<SendResult> {
         const frontendUrl = this.configService.get('FRONTEND_URL') || 'http://localhost:5173';
         
-        const { subject, html, text } = templates.payment.confirmed({
+        const { subject, html, text } = templates.payment.confirmed(this.withEmailBranding({
             clientName: client.company_name || client.first_name || 'Client',
             companyName: company.name,
             companyLogo: company.logo_url,
@@ -663,7 +681,7 @@ ${company.name}
             paymentMethod,
             transactionId,
             viewUrl: invoice.signature_token ? `${frontendUrl}/invoices/view/${invoice.signature_token}` : undefined,
-        });
+        }));
 
         return this.sendEmail({
             to: client.email,
@@ -685,7 +703,7 @@ ${company.name}
     ): Promise<SendResult> {
         const frontendUrl = this.configService.get('FRONTEND_URL') || 'http://localhost:5173';
         
-        const { subject, html, text } = templates.payment.partial({
+        const { subject, html, text } = templates.payment.partial(this.withEmailBranding({
             clientName: client.company_name || client.first_name || 'Client',
             companyName: company.name,
             companyLogo: company.logo_url,
@@ -701,7 +719,7 @@ ${company.name}
             totalAmount: invoice.total,
             dueDate: invoice.due_date,
             paymentUrl: invoice.payment_link || (invoice.signature_token ? `${frontendUrl}/invoices/view/${invoice.signature_token}` : undefined),
-        });
+        }));
 
         return this.sendEmail({
             to: client.email,
@@ -721,14 +739,14 @@ ${company.name}
     ): Promise<SendResult> {
         const frontendUrl = this.configService.get('FRONTEND_URL') || 'http://localhost:5173';
         
-        const { subject, html, text } = templates.general.welcome({
+        const { subject, html, text } = templates.general.welcome(this.withEmailBranding({
             userName: user.first_name || user.email.split('@')[0],
             companyName: company?.name || 'Notre plateforme',
             companyLogo: company?.logo_url,
             companyEmail: company?.email,
             companyPhone: company?.phone,
             loginUrl: `${frontendUrl}/login`,
-        });
+        }));
 
         return this.sendEmail({
             to: user.email,
@@ -753,7 +771,7 @@ ${company.name}
         const roleName = ROLE_LABELS[role as CompanyRole] || role;
         const inviteUrl = `${frontendUrl}/auth/register?invite=${invitationToken}`;
         const subject = `Invitation à rejoindre ${company.name}`;
-        const { html, text } = templates.general.invite({
+        const { html, text } = templates.general.invite(this.withEmailBranding({
             inviterName,
             role,
             roleName,
@@ -766,7 +784,7 @@ ${company.name}
             companyEmail: company.email,
             companyPhone: company.phone,
             companySiren: company.siren,
-        });
+        }));
 
         return this.sendEmail({
             to: email,
@@ -787,11 +805,11 @@ ${company.name}
     ): Promise<SendResult> {
         const frontendUrl = this.configService.get('FRONTEND_URL') || 'http://localhost:5173';
         
-        const { subject, html, text } = templates.general.passwordReset({
+        const { subject, html, text } = templates.general.passwordReset(this.withEmailBranding({
             resetUrl: `${frontendUrl}/reset-password?token=${resetToken}`,
             companyName: companyName || 'Notre plateforme',
             expirationMinutes: 60,
-        });
+        }));
 
         return this.sendEmail({
             to: email,
@@ -812,7 +830,7 @@ ${company.name}
         actionUrl?: string,
         actionLabel?: string,
     ): Promise<SendResult> {
-        const { subject, html, text } = templates.general.notification({
+        const { subject, html, text } = templates.general.notification(this.withEmailBranding({
             title,
             message,
             companyName: company?.name,
@@ -821,7 +839,7 @@ ${company.name}
             companyPhone: company?.phone,
             actionUrl,
             actionLabel,
-        });
+        }));
 
         return this.sendEmail({
             to: email,
@@ -843,7 +861,7 @@ ${company.name}
     ): Promise<SendResult> {
         const frontendUrl = this.configService.get('FRONTEND_URL') || 'http://localhost:5173';
         
-        const { subject, html, text } = templates.quote.accepted({
+        const { subject, html, text } = templates.quote.accepted(this.withEmailBranding({
             clientName: client.company_name || `${client.first_name} ${client.last_name}`.trim() || 'Client',
             companyName: company.name,
             companyLogo: company.logo_url,
@@ -854,7 +872,7 @@ ${company.name}
             acceptedDate: new Date().toISOString(),
             signatureUrl: quote.signature_url,
             viewUrl: `${frontendUrl}/quotes/${quote.id}`,
-        });
+        }));
 
         return this.sendEmail({
             to: sellerEmail,
@@ -876,7 +894,7 @@ ${company.name}
     ): Promise<SendResult> {
         const frontendUrl = this.configService.get('FRONTEND_URL') || 'http://localhost:5173';
         
-        const { subject, html, text } = templates.quote.refused({
+        const { subject, html, text } = templates.quote.refused(this.withEmailBranding({
             clientName: client.company_name || `${client.first_name} ${client.last_name}`.trim() || 'Client',
             companyName: company.name,
             companyLogo: company.logo_url,
@@ -887,7 +905,7 @@ ${company.name}
             refusedDate: new Date().toISOString(),
             reason,
             viewUrl: `${frontendUrl}/quotes/${quote.id}`,
-        });
+        }));
 
         return this.sendEmail({
             to: sellerEmail,
@@ -910,7 +928,7 @@ ${company.name}
         
         const invoiceType = invoice.type === 'credit_note' ? 'credit' : (invoice.type || 'standard');
 
-        const { subject, html, text } = templates.invoice.new({
+        const { subject, html, text } = templates.invoice.new(this.withEmailBranding({
             clientName: client.company_name || client.first_name || 'Client',
             companyName: company.name,
             companyLogo: company.logo_url,
@@ -928,7 +946,7 @@ ${company.name}
             subject: invoice.subject,
             viewUrl: invoice.signature_token ? `${frontendUrl}/invoices/view/${invoice.signature_token}` : undefined,
             paymentUrl: invoiceType === 'credit' ? undefined : invoice.payment_link,
-        });
+        }));
 
         const typePrefix = invoice.type === 'credit_note' ? 'avoir' : 'facture';
         const attachments = pdfBuffer ? [{
@@ -957,7 +975,7 @@ ${company.name}
     ): Promise<SendResult> {
         const { signUrl, viewUrl, termsUrl } = this.getQuotePublicUrls(quote);
         
-        const { subject, html, text } = templates.quote.new({
+        const { subject, html, text } = templates.quote.new(this.withEmailBranding({
             clientName: client.company_name || client.first_name || 'Client',
             companyName: company.name,
             companyLogo: company.logo_url,
@@ -975,7 +993,7 @@ ${company.name}
             signUrl,
             viewUrl,
             termsUrl,
-        });
+        }));
 
         const attachments = pdfBuffer ? [{
             filename: `devis-${quote.quote_number}.pdf`,
@@ -1010,7 +1028,7 @@ ${company.name}
                 ? templates.invoice.reminder2 
                 : templates.invoice.reminder3;
         
-        const { subject, html, text } = templateFn({
+        const { subject, html, text } = templateFn(this.withEmailBranding({
             clientName: client.company_name || client.first_name || 'Client',
             companyName: company.name,
             companyLogo: company.logo_url,
@@ -1026,7 +1044,7 @@ ${company.name}
             daysOverdue: Math.floor((Date.now() - new Date(invoice.due_date).getTime()) / (1000 * 60 * 60 * 24)),
             paymentUrl: invoice.payment_link || (invoice.signature_token ? `${frontendUrl}/invoices/view/${invoice.signature_token}` : undefined),
             viewUrl: invoice.signature_token ? `${frontendUrl}/invoices/view/${invoice.signature_token}` : undefined,
-        });
+        }));
 
         const attachments = pdfBuffer ? [{
             filename: `facture-${invoice.invoice_number}.pdf`,
@@ -1054,7 +1072,7 @@ ${company.name}
     ): Promise<SendResult> {
         const { signUrl, viewUrl } = this.getQuotePublicUrls(quote);
         
-        const { subject, html, text } = templates.quote.expiring({
+        const { subject, html, text } = templates.quote.expiring(this.withEmailBranding({
             clientName: client.company_name || client.first_name || 'Client',
             companyName: company.name,
             companyLogo: company.logo_url,
@@ -1070,7 +1088,7 @@ ${company.name}
             daysRemaining,
             signUrl,
             viewUrl,
-        });
+        }));
 
         return this.sendEmail({
             to: client.email,

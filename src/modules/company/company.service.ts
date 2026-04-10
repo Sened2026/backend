@@ -80,10 +80,32 @@ interface UserCompanyRelation {
 }
 
 type OwnerCompanyRole = "merchant_admin" | "accountant";
+type InvitationType = "member" | "accountant_firm" | "merchant_signup";
 
 type AccountantDocumentType = AccountantDocumentTypeDto;
 type AccountantDocumentPeriod = AccountantDocumentPeriodDto;
 type AccountantDocumentStatus = AccountantDocumentStatusDto;
+
+interface MerchantSignupDraft {
+  company_name: string;
+  siren: string;
+  siret?: string | null;
+  address?: string | null;
+  postal_code?: string | null;
+  city?: string | null;
+  country?: string | null;
+}
+
+export interface MerchantSignupInvitationSummary {
+  id: string;
+  email: string;
+  role: CompanyRole;
+  created_at: string;
+  expires_at: string;
+  company_name: string | null;
+  siren: string | null;
+  city: string | null;
+}
 
 interface AccountantStoredDocumentRecord {
   id: string;
@@ -1499,50 +1521,6 @@ export class CompanyService {
     await supabase.from("units").insert(defaultUnits);
   }
 
-  private async createPendingMerchantCompanyForCabinetInvite(
-    userId: string,
-    data: {
-      name: string;
-      legal_name?: string;
-      siren: string;
-      address?: string;
-      postal_code?: string;
-      city?: string;
-      country: string;
-    },
-  ): Promise<{ id: string }> {
-    const supabase = getSupabaseAdmin();
-
-    const { data: company, error } = await supabase
-      .from("companies")
-      .insert({
-        name: data.name,
-        legal_name: data.legal_name || null,
-        siren: data.siren,
-        address: data.address || null,
-        postal_code: data.postal_code || null,
-        city: data.city || null,
-        country: data.country,
-        owner_id: userId,
-        accountant_company_id: null,
-        default_vat_rate: 20.0,
-        default_payment_terms: 30,
-        quote_validity_days: 30,
-      })
-      .select("id")
-      .single();
-
-    if (error || !company) {
-      throw new BadRequestException(
-        `Erreur lors de la création de l'entreprise invitée: ${error?.message || "inconnue"}`,
-      );
-    }
-
-    await this.createDefaultUnits(company.id);
-
-    return { id: company.id };
-  }
-
   private async createAccountantLinkRequestRecord(
     userId: string,
     accountantCompanyId: string,
@@ -1799,10 +1777,9 @@ export class CompanyService {
     | {
         status: "existing_merchant";
         merchant_company: { id: string; name: string; siren: string | null };
-      }
+    }
     | {
         status: "invited";
-        client_company_id: string;
         invitation_id: string;
         email: string;
       }
@@ -1849,55 +1826,89 @@ export class CompanyService {
       };
     }
 
-    const createdCompany = await this.createPendingMerchantCompanyForCabinetInvite(
+    const invitation = await this.createMerchantSignupInvitation(
       userId,
+      accountantCompanyId,
+      normalizedEmail,
       {
-        name: companyName,
-        legal_name: companyName,
+        company_name: companyName,
         siren: normalizedIdentifiers.siren,
-        address: dto.address?.trim() || undefined,
-        postal_code: dto.postal_code?.trim() || undefined,
-        city: dto.city?.trim() || undefined,
+        siret: normalizedIdentifiers.siret || null,
+        address: dto.address?.trim() || null,
+        postal_code: dto.postal_code?.trim() || null,
+        city: dto.city?.trim() || null,
         country: normalizedIdentifiers.country,
       },
     );
 
-    let invitation;
-    try {
-      await this.createAccountantLinkRequestRecord(
-        userId,
-        accountantCompanyId,
-        createdCompany.id,
-        "new_client_invitation",
-      );
-
-      invitation = await this.createCompanyInvitation(
-        userId,
-        createdCompany.id,
-        normalizedEmail,
-        "merchant_admin",
-        "merchant_admin",
-      );
-    } catch (error) {
-      const supabase = getSupabaseAdmin();
-      await supabase.from("companies").delete().eq("id", createdCompany.id);
-      throw error;
-    }
-
-    if (invitation.status === "accepted") {
-      await this.acceptNewClientInvitationLinkRequest(
-        createdCompany.id,
-        userId,
-        userId,
-      );
-    }
-
     return {
       status: "invited",
-      client_company_id: createdCompany.id,
       invitation_id: invitation.id,
       email: normalizedEmail,
     };
+  }
+
+  async getMerchantSignupInvitations(
+    userId: string,
+    accountantCompanyId: string,
+  ): Promise<MerchantSignupInvitationSummary[]> {
+    const supabase = getSupabaseAdmin();
+
+    const userRole = await this.checkUserAccess(userId, accountantCompanyId);
+    if (userRole !== "accountant") {
+      throw new ForbiddenException(
+        "Seul un expert-comptable administrateur peut consulter ces invitations",
+      );
+    }
+
+    const { data, error } = await supabase
+      .from("company_invitations")
+      .select(
+        "id, email, role, created_at, expires_at, signup_company_name, signup_siren, signup_city",
+      )
+      .eq("company_id", accountantCompanyId)
+      .eq("invitation_type", "merchant_signup")
+      .is("accepted_at", null)
+      .gt("expires_at", new Date().toISOString())
+      .order("created_at", { ascending: false });
+
+    if (error) {
+      throw new BadRequestException(
+        `Erreur lors du chargement des invitations marchand: ${error.message}`,
+      );
+    }
+
+    return (data || []).map((invitation: any) => ({
+      id: invitation.id,
+      email: invitation.email,
+      role: invitation.role as CompanyRole,
+      created_at: invitation.created_at,
+      expires_at: invitation.expires_at,
+      company_name: invitation.signup_company_name || null,
+      siren: invitation.signup_siren || null,
+      city: invitation.signup_city || null,
+    }));
+  }
+
+  async cancelMerchantSignupInvitation(
+    userId: string,
+    accountantCompanyId: string,
+    invitationId: string,
+  ): Promise<{ message: string }> {
+    const userRole = await this.checkUserAccess(userId, accountantCompanyId);
+    if (userRole !== "accountant") {
+      throw new ForbiddenException(
+        "Seul un expert-comptable administrateur peut annuler ces invitations",
+      );
+    }
+
+    return this.cancelCompanyInvitation(
+      accountantCompanyId,
+      invitationId,
+      "accountant",
+      ["merchant_admin"],
+      ["merchant_signup"],
+    );
   }
 
   async getLinkedClients(userId: string, companyId: string): Promise<any[]> {
@@ -2031,6 +2042,7 @@ export class CompanyService {
       .select("id, email, role, created_at, expires_at")
       .eq("company_id", clientId)
       .eq("role", "merchant_admin")
+      .eq("invitation_type", "member")
       .is("accepted_at", null)
       .gt("expires_at", new Date().toISOString())
       .order("created_at", { ascending: false });
@@ -2632,20 +2644,27 @@ export class CompanyService {
   async validateInviteToken(token: string): Promise<{
     email: string;
     role: CompanyRole;
-    invitation_type: "member" | "accountant_firm";
+    invitation_type: InvitationType;
     company_id: string;
     company_name: string;
     inviter_name: string;
     expires_at: string;
     invited_firm_name?: string | null;
     invited_firm_siren?: string | null;
+    signup_company_name?: string | null;
+    signup_siren?: string | null;
+    signup_siret?: string | null;
+    signup_address?: string | null;
+    signup_postal_code?: string | null;
+    signup_city?: string | null;
+    signup_country?: string | null;
   } | null> {
     const supabase = getSupabaseAdmin();
 
     const { data: invitation, error } = await supabase
       .from("company_invitations")
       .select(
-        "company_id, email, role, invitation_type, expires_at, invited_by, invited_firm_name, invited_firm_siren, company:companies(name)",
+        "company_id, email, role, invitation_type, expires_at, invited_by, invited_firm_name, invited_firm_siren, signup_company_name, signup_siren, signup_siret, signup_address, signup_postal_code, signup_city, signup_country, company:companies(name)",
       )
       .eq("token", token)
       .is("accepted_at", null)
@@ -2670,14 +2689,20 @@ export class CompanyService {
       company_id: invitation.company_id,
       email: invitation.email,
       role: invitation.role as CompanyRole,
-      invitation_type: ((invitation as any).invitation_type || "member") as
-        | "member"
-        | "accountant_firm",
+      invitation_type: ((invitation as any).invitation_type ||
+        "member") as InvitationType,
       company_name: (invitation.company as any)?.name || "Entreprise",
       inviter_name: inviterName,
       expires_at: invitation.expires_at,
       invited_firm_name: (invitation as any).invited_firm_name || null,
       invited_firm_siren: (invitation as any).invited_firm_siren || null,
+      signup_company_name: (invitation as any).signup_company_name || null,
+      signup_siren: (invitation as any).signup_siren || null,
+      signup_siret: (invitation as any).signup_siret || null,
+      signup_address: (invitation as any).signup_address || null,
+      signup_postal_code: (invitation as any).signup_postal_code || null,
+      signup_city: (invitation as any).signup_city || null,
+      signup_country: (invitation as any).signup_country || null,
     };
   }
 
@@ -2712,6 +2737,7 @@ export class CompanyService {
       .from("company_invitations")
       .select("id, email, role, created_at, expires_at")
       .eq("company_id", companyId)
+      .eq("invitation_type", "member")
       .is("accepted_at", null)
       .gt("expires_at", new Date().toISOString())
       .order("created_at", { ascending: false });
@@ -3331,6 +3357,7 @@ export class CompanyService {
     email: string,
     role: CompanyRole,
     companyOwnerRole: CompanyOwnerRole,
+    invitationType: InvitationType = "member",
   ): Promise<any> {
     const supabase = getSupabaseAdmin();
     const normalizedEmail = email.trim().toLowerCase();
@@ -3377,6 +3404,7 @@ export class CompanyService {
         email: normalizedEmail,
         role,
         invited_by: userId,
+        invitation_type: invitationType,
       })
       .select()
       .single();
@@ -3483,18 +3511,115 @@ export class CompanyService {
     return { ...invitation, status: "pending" };
   }
 
+  private async createMerchantSignupInvitation(
+    userId: string,
+    accountantCompanyId: string,
+    email: string,
+    draft: MerchantSignupDraft,
+  ): Promise<{ id: string; token: string; email: string; role: CompanyRole }> {
+    const supabase = getSupabaseAdmin();
+    const normalizedEmail = email.trim().toLowerCase();
+
+    const { data: existingProfile } = await supabase
+      .from("profiles")
+      .select("id")
+      .ilike("email", normalizedEmail)
+      .maybeSingle();
+
+    if (existingProfile) {
+      throw new ConflictException(
+        "Cette adresse email possède déjà un compte SENED. Utilisez une autre adresse pour inviter un nouveau marchand.",
+      );
+    }
+
+    const { data: existingInvite } = await supabase
+      .from("company_invitations")
+      .select("id")
+      .eq("company_id", accountantCompanyId)
+      .ilike("email", normalizedEmail)
+      .is("accepted_at", null)
+      .maybeSingle();
+
+    if (existingInvite) {
+      throw new ConflictException(
+        "Une invitation est déjà en attente pour cet email",
+      );
+    }
+
+    const { data: invitation, error } = await supabase
+      .from("company_invitations")
+      .insert({
+        company_id: accountantCompanyId,
+        email: normalizedEmail,
+        role: "merchant_admin",
+        invited_by: userId,
+        invitation_type: "merchant_signup",
+        signup_company_name: draft.company_name,
+        signup_siren: draft.siren,
+        signup_siret: draft.siret || null,
+        signup_address: draft.address || null,
+        signup_postal_code: draft.postal_code || null,
+        signup_city: draft.city || null,
+        signup_country: draft.country || "FR",
+      })
+      .select("id, token, email, role")
+      .single();
+
+    if (error || !invitation) {
+      throw new BadRequestException(
+        `Erreur lors de l'invitation: ${error?.message || "inconnue"}`,
+      );
+    }
+
+    const { data: company } = await supabase
+      .from("companies")
+      .select("name, email, phone, address, postal_code, city, siren, logo_url")
+      .eq("id", accountantCompanyId)
+      .single();
+
+    const { data: inviter } = await supabase
+      .from("profiles")
+      .select("first_name, last_name")
+      .eq("id", userId)
+      .single();
+
+    const inviterName =
+      [inviter?.first_name, inviter?.last_name].filter(Boolean).join(" ") ||
+      "Un administrateur";
+
+    try {
+      await this.notificationService.sendInviteEmail(
+        normalizedEmail,
+        inviterName,
+        company,
+        "merchant_admin",
+        invitation.token,
+      );
+    } catch {
+      // Ne pas échouer si l'envoi email échoue
+    }
+
+    return {
+      id: invitation.id,
+      token: invitation.token,
+      email: invitation.email,
+      role: invitation.role as CompanyRole,
+    };
+  }
+
   private async cancelCompanyInvitation(
     companyId: string,
     invitationId: string,
     companyOwnerRole: CompanyOwnerRole,
     allowedRoles?: CompanyRole[],
+    allowedInvitationTypes?: InvitationType[],
   ): Promise<{ message: string }> {
     const supabase = getSupabaseAdmin();
 
     const { data: invitationToCancel, error: invitationError } = await supabase
       .from("company_invitations")
       .select(
-        "id, company_id, email, role, token, invited_by, expires_at, invitation_type",
+        "id, company_id, email, role, token, invited_by, expires_at, invitation_type, signup_company_name, signup_siren, signup_siret, signup_address, signup_postal_code, signup_city, signup_country",
       )
       .eq("id", invitationId)
       .eq("company_id", companyId)
@@ -3511,6 +3636,15 @@ export class CompanyService {
     if (
       allowedRoles &&
       !allowedRoles.includes(invitationToCancel.role as CompanyRole)
+    ) {
+      throw new NotFoundException("Invitation introuvable");
+    }
+
+    if (
+      allowedInvitationTypes &&
+      !allowedInvitationTypes.includes(
+        ((invitationToCancel as any).invitation_type || "member") as InvitationType,
+      )
     ) {
       throw new NotFoundException("Invitation introuvable");
     }
@@ -3543,6 +3677,15 @@ export class CompanyService {
           invited_by: invitationToCancel.invited_by,
           expires_at: invitationToCancel.expires_at,
           invitation_type: invitationToCancel.invitation_type || "member",
+          signup_company_name:
+            (invitationToCancel as any).signup_company_name || null,
+          signup_siren: (invitationToCancel as any).signup_siren || null,
+          signup_siret: (invitationToCancel as any).signup_siret || null,
+          signup_address: (invitationToCancel as any).signup_address || null,
+          signup_postal_code:
+            (invitationToCancel as any).signup_postal_code || null,
+          signup_city: (invitationToCancel as any).signup_city || null,
+          signup_country: (invitationToCancel as any).signup_country || null,
         });
 
         throw new BadRequestException(

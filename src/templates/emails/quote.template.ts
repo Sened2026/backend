@@ -6,7 +6,7 @@
  * - Refus
  */
 
-import { baseStyles, generateFooter, wrapTemplate, EmailTemplateData, renderEmailHeaderLogo } from './base.template';
+import { baseStyles, generateFooter, wrapTemplate, EmailTemplateData, renderEmailHeaderLogo, appendGeneratedBySenedText } from './base.template';
 
 export interface QuoteEmailData extends EmailTemplateData {
     clientName: string;
@@ -149,7 +149,7 @@ Cordialement,
 ${data.companyName}
     `;
     
-    return { subject, html: wrapTemplate(content), text };
+    return { subject, html: wrapTemplate(content), text: appendGeneratedBySenedText(text) };
 }
 
 /**
@@ -227,7 +227,7 @@ Cordialement,
 ${data.companyName}
     `;
     
-    return { subject, html: wrapTemplate(content), text };
+    return { subject, html: wrapTemplate(content), text: appendGeneratedBySenedText(text) };
 }
 
 /**
@@ -303,7 +303,7 @@ Une facture vous sera transmise dans les plus brefs délais.
 ${data.companyName}
     `;
     
-    return { subject, html: wrapTemplate(content), text };
+    return { subject, html: wrapTemplate(content), text: appendGeneratedBySenedText(text) };
 }
 
 /**
@@ -368,5 +368,5 @@ Cordialement,
 ${data.companyName}
     `;
     
-    return { subject, html: wrapTemplate(content), text };
+    return { subject, html: wrapTemplate(content), text: appendGeneratedBySenedText(text) };
 }

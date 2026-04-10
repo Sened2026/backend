@@ -129,6 +129,10 @@ describe('buildSubscriptionMemberUsage', () => {
 
 describe('SubscriptionService.syncMemberQuantity', () => {
     let service: SubscriptionService;
+    let legalDocumentServiceMock: {
+        ensurePlatformAcceptanceCurrent: jest.Mock;
+        validateCurrentPlatformAcceptanceTimestamp: jest.Mock;
+    };
     let stripeMock: {
         paymentMethods: { retrieve: jest.Mock };
         subscriptionItems: {
@@ -136,12 +140,21 @@ describe('SubscriptionService.syncMemberQuantity', () => {
             del: jest.Mock;
             update: jest.Mock;
         };
-        subscriptions: { retrieve: jest.Mock };
-        customers: { retrieve: jest.Mock };
+        subscriptions: { retrieve: jest.Mock; create: jest.Mock };
+        customers: { retrieve: jest.Mock; create: jest.Mock };
         prices: { list: jest.Mock };
+        promotionCodes: { list: jest.Mock };
+        coupons: { retrieve: jest.Mock };
     };
 
     beforeEach(() => {
+        process.env.REGISTRATION_ENCRYPTION_KEY = '12345678901234567890123456789012';
+
+        legalDocumentServiceMock = {
+            ensurePlatformAcceptanceCurrent: jest.fn(),
+            validateCurrentPlatformAcceptanceTimestamp: jest.fn(),
+        };
+
         service = new SubscriptionService(
             {
                 get: jest.fn((key: string, defaultValue?: string) => {
@@ -152,7 +165,7 @@ describe('SubscriptionService.syncMemberQuantity', () => {
                     return defaultValue;
                 }),
             } as any,
-            { ensurePlatformAcceptanceCurrent: jest.fn() } as any,
+            legalDocumentServiceMock as any,
         );
 
         stripeMock = {
@@ -166,12 +179,20 @@ describe('SubscriptionService.syncMemberQuantity', () => {
             },
             subscriptions: {
                 retrieve: jest.fn(),
+                create: jest.fn(),
             },
             customers: {
                 retrieve: jest.fn(),
+                create: jest.fn(),
             },
             prices: {
                 list: jest.fn(),
+            },
+            promotionCodes: {
+                list: jest.fn(),
+            },
+            coupons: {
+                retrieve: jest.fn(),
             },
         };
 
@@ -179,6 +200,7 @@ describe('SubscriptionService.syncMemberQuantity', () => {
     });
 
     afterEach(() => {
+        delete process.env.REGISTRATION_ENCRYPTION_KEY;
         jest.restoreAllMocks();
     });
 
@@ -303,6 +325,422 @@ describe('SubscriptionService.syncMemberQuantity', () => {
         );
         expect(stripeMock.subscriptionItems.update.mock.calls[0][1]).not.toHaveProperty(
             'payment_behavior',
+        );
+    });
+
+    it('validates a percent-off promotion code for registration pricing', async () => {
+        jest.mocked(getSupabaseAdmin).mockReturnValue({
+            from: jest.fn(() => ({
+                select: jest.fn(() => ({
+                    eq: jest.fn().mockReturnValue({
+                        eq: jest.fn().mockReturnValue({
+                            single: jest.fn().mockResolvedValue({
+                                data: {
+                                    id: 'plan_123',
+                                    slug: 'essentiel',
+                                    is_active: true,
+                                    price_monthly: 9.9,
+                                    price_yearly: 99,
+                                    stripe_lookup_key_monthly: 'essentiel_monthly',
+                                    stripe_lookup_key_yearly: 'essentiel_yearly',
+                                },
+                            }),
+                        }),
+                    }),
+                })),
+            })),
+        } as any);
+
+        stripeMock.prices.list.mockResolvedValue({
+            data: [
+                {
+                    id: 'price_123',
+                    unit_amount: 990,
+                    currency: 'eur',
+                    product: 'prod_123',
+                },
+            ],
+        });
+        stripeMock.promotionCodes.list.mockResolvedValue({
+            data: [
+                {
+                    id: 'promo_123',
+                    code: 'BIENVENUE20',
+                    active: true,
+                    times_redeemed: 0,
+                    max_redemptions: null,
+                    restrictions: {},
+                    coupon: {
+                        id: 'coupon_123',
+                        name: 'Bienvenue',
+                        percent_off: 20,
+                        amount_off: null,
+                        valid: true,
+                        applies_to: { products: ['prod_123'] },
+                    },
+                },
+            ],
+        });
+
+        const result = await service.validateRegistrationPromotionCode({
+            plan_slug: 'essentiel',
+            billing_period: 'monthly',
+            promotion_code: 'BIENVENUE20',
+        });
+
+        expect(result.pricing).toEqual(
+            expect.objectContaining({
+                original_amount_ht: 9.9,
+                discount_amount_ht: 1.98,
+                final_amount_ht: 7.92,
+                promotion_code: 'BIENVENUE20',
+                coupon_name: 'Bienvenue',
+                coupon_percent_off: 20,
+                coupon_amount_off: null,
+            }),
+        );
+    });
+
+    it('validates a fixed-amount promotion code for registration pricing', async () => {
+        jest.mocked(getSupabaseAdmin).mockReturnValue({
+            from: jest.fn(() => ({
+                select: jest.fn(() => ({
+                    eq: jest.fn().mockReturnValue({
+                        eq: jest.fn().mockReturnValue({
+                            single: jest.fn().mockResolvedValue({
+                                data: {
+                                    id: 'plan_123',
+                                    slug: 'business',
+                                    is_active: true,
+                                    price_monthly: 12.9,
+                                    price_yearly: 129,
+                                    stripe_lookup_key_monthly: 'business_monthly',
+                                    stripe_lookup_key_yearly: 'business_yearly',
+                                },
+                            }),
+                        }),
+                    }),
+                })),
+            })),
+        } as any);
+
+        stripeMock.prices.list.mockResolvedValue({
+            data: [
+                {
+                    id: 'price_123',
+                    unit_amount: 1290,
+                    currency: 'eur',
+                    product: 'prod_123',
+                },
+            ],
+        });
+        stripeMock.promotionCodes.list.mockResolvedValue({
+            data: [
+                {
+                    id: 'promo_123',
+                    code: 'WELCOME5',
+                    active: true,
+                    times_redeemed: 0,
+                    max_redemptions: null,
+                    restrictions: {},
+                    coupon: {
+                        id: 'coupon_123',
+                        name: 'Welcome 5',
+                        percent_off: null,
+                        amount_off: 500,
+                        currency: 'eur',
+                        valid: true,
+                        applies_to: { products: ['prod_123'] },
+                    },
+                },
+            ],
+        });
+
+        const result = await service.validateRegistrationPromotionCode({
+            plan_slug: 'business',
+            billing_period: 'monthly',
+            promotion_code: 'WELCOME5',
+        });
+
+        expect(result.pricing).toEqual(
+            expect.objectContaining({
+                original_amount_ht: 12.9,
+                discount_amount_ht: 5,
+                final_amount_ht: 7.9,
+                promotion_code: 'WELCOME5',
+                coupon_name: 'Welcome 5',
+                coupon_percent_off: null,
+                coupon_amount_off: 5,
+            }),
+        );
+    });
+
+    it('rejects an unknown promotion code for registration pricing', async () => {
+        jest.mocked(getSupabaseAdmin).mockReturnValue({
+            from: jest.fn(() => ({
+                select: jest.fn(() => ({
+                    eq: jest.fn().mockReturnValue({
+                        eq: jest.fn().mockReturnValue({
+                            single: jest.fn().mockResolvedValue({
+                                data: {
+                                    id: 'plan_123',
+                                    slug: 'essentiel',
+                                    is_active: true,
+                                    price_monthly: 9.9,
+                                    price_yearly: 99,
+                                    stripe_lookup_key_monthly: 'essentiel_monthly',
+                                    stripe_lookup_key_yearly: 'essentiel_yearly',
+                                },
+                            }),
+                        }),
+                    }),
+                })),
+            })),
+        } as any);
+
+        stripeMock.prices.list.mockResolvedValue({
+            data: [
+                {
+                    id: 'price_123',
+                    unit_amount: 990,
+                    currency: 'eur',
+                    product: 'prod_123',
+                },
+            ],
+        });
+        stripeMock.promotionCodes.list.mockResolvedValue({ data: [] });
+
+        await expect(
+            service.validateRegistrationPromotionCode({
+                plan_slug: 'essentiel',
+                billing_period: 'monthly',
+                promotion_code: 'NOPE',
+            }),
+        ).rejects.toThrow(
+            'Ce code promo est introuvable dans l’environnement Stripe configuré sur ce serveur. Vérifiez qu’il a été créé sur le même compte et dans le même mode (test/live).',
+        );
+    });
+
+    it('rejects an inactive promotion code for registration pricing', async () => {
+        jest.mocked(getSupabaseAdmin).mockReturnValue({
+            from: jest.fn(() => ({
+                select: jest.fn(() => ({
+                    eq: jest.fn().mockReturnValue({
+                        eq: jest.fn().mockReturnValue({
+                            single: jest.fn().mockResolvedValue({
+                                data: {
+                                    id: 'plan_123',
+                                    slug: 'essentiel',
+                                    is_active: true,
+                                    price_monthly: 9.9,
+                                    price_yearly: 99,
+                                    stripe_lookup_key_monthly: 'essentiel_monthly',
+                                    stripe_lookup_key_yearly: 'essentiel_yearly',
+                                },
+                            }),
+                        }),
+                    }),
+                })),
+            })),
+        } as any);
+
+        stripeMock.prices.list.mockResolvedValue({
+            data: [
+                {
+                    id: 'price_123',
+                    unit_amount: 990,
+                    currency: 'eur',
+                    product: 'prod_123',
+                },
+            ],
+        });
+        stripeMock.promotionCodes.list.mockResolvedValue({
+            data: [
+                {
+                    id: 'promo_123',
+                    code: 'EXPIRE',
+                    active: false,
+                    times_redeemed: 0,
+                    max_redemptions: null,
+                    restrictions: {},
+                    coupon: {
+                        id: 'coupon_123',
+                        percent_off: 10,
+                        amount_off: null,
+                        valid: true,
+                        applies_to: { products: ['prod_123'] },
+                    },
+                },
+            ],
+        });
+
+        await expect(
+            service.validateRegistrationPromotionCode({
+                plan_slug: 'essentiel',
+                billing_period: 'monthly',
+                promotion_code: 'EXPIRE',
+            }),
+        ).rejects.toThrow('Ce code promo est invalide ou expiré.');
+    });
+
+    it('creates a registration subscription with discounts when a promo code is valid', async () => {
+        const supabaseMock = {
+            from: jest.fn((table: string) => {
+                if (table === 'registration_payment_sessions') {
+                    return {
+                        insert: jest.fn(() => ({
+                            select: jest.fn(() => ({
+                                single: jest.fn().mockResolvedValue({
+                                    data: {
+                                        id: 'reg_123',
+                                    },
+                                }),
+                            })),
+                        })),
+                        update: jest.fn(() => ({
+                            eq: jest.fn().mockResolvedValue({ error: null }),
+                        })),
+                    };
+                }
+
+                throw new Error(`Unexpected table: ${table}`);
+            }),
+        };
+
+        jest.mocked(getSupabaseAdmin).mockReturnValue(supabaseMock as any);
+        jest.spyOn(service as any, 'ensureRegistrationEmailAvailable').mockResolvedValue(undefined);
+        jest.spyOn(service as any, 'ensureRegistrationCompanyAvailable').mockResolvedValue(undefined);
+        jest.spyOn(service as any, 'cancelExistingRegistrationSessions').mockResolvedValue(undefined);
+        jest.spyOn(service as any, 'resolveRegistrationPricingContext').mockResolvedValue({
+            plan: { id: 'plan_123' },
+            basePriceId: 'price_123',
+            basePrice: { id: 'price_123', unit_amount: 990, currency: 'eur' },
+            pricing: {
+                original_amount_ht: 9.9,
+                discount_amount_ht: 2,
+                final_amount_ht: 7.9,
+                currency: 'EUR',
+                promotion_code: 'BIENVENUE20',
+                coupon_name: 'Bienvenue',
+                coupon_percent_off: 20,
+                coupon_amount_off: null,
+            },
+            stripePromotionCodeId: 'promo_123',
+        });
+
+        stripeMock.customers.create.mockResolvedValue({ id: 'cus_123' });
+        stripeMock.subscriptions.create.mockResolvedValue({
+            id: 'sub_123',
+            status: 'incomplete',
+            items: { data: [{ id: 'si_123' }] },
+            latest_invoice: {
+                subtotal: 990,
+                total_discount_amounts: [{ amount: 200 }],
+                confirmation_secret: { client_secret: 'secret_123' },
+                payment_intent: null,
+            },
+        });
+
+        const result = await service.createRegistrationSubscription({
+            email: 'test@example.com',
+            password: 'Password123!',
+            first_name: 'Jean',
+            last_name: 'Dupont',
+            company_creation_mode: 'create',
+            company_name: 'Demo',
+            siren: '123456789',
+            role: 'merchant_admin',
+            plan_slug: 'essentiel',
+            billing_period: 'monthly',
+            promotion_code: 'BIENVENUE20',
+            platform_legal_accepted_at: new Date().toISOString(),
+        });
+
+        expect(legalDocumentServiceMock.validateCurrentPlatformAcceptanceTimestamp).toHaveBeenCalled();
+        expect(stripeMock.subscriptions.create).toHaveBeenCalledWith(
+            expect.objectContaining({
+                discounts: [{ promotion_code: 'promo_123' }],
+            }),
+        );
+        expect(result.pricing.discount_amount_ht).toBe(2);
+    });
+
+    it('creates a registration subscription without discounts when no promo code is provided', async () => {
+        const supabaseMock = {
+            from: jest.fn((table: string) => {
+                if (table === 'registration_payment_sessions') {
+                    return {
+                        insert: jest.fn(() => ({
+                            select: jest.fn(() => ({
+                                single: jest.fn().mockResolvedValue({
+                                    data: {
+                                        id: 'reg_123',
+                                    },
+                                }),
+                            })),
+                        })),
+                        update: jest.fn(() => ({
+                            eq: jest.fn().mockResolvedValue({ error: null }),
+                        })),
+                    };
+                }
+
+                throw new Error(`Unexpected table: ${table}`);
+            }),
+        };
+
+        jest.mocked(getSupabaseAdmin).mockReturnValue(supabaseMock as any);
+        jest.spyOn(service as any, 'ensureRegistrationEmailAvailable').mockResolvedValue(undefined);
+        jest.spyOn(service as any, 'ensureRegistrationCompanyAvailable').mockResolvedValue(undefined);
+        jest.spyOn(service as any, 'cancelExistingRegistrationSessions').mockResolvedValue(undefined);
+        jest.spyOn(service as any, 'resolveRegistrationPricingContext').mockResolvedValue({
+            plan: { id: 'plan_123' },
+            basePriceId: 'price_123',
+            basePrice: { id: 'price_123', unit_amount: 990, currency: 'eur' },
+            pricing: {
+                original_amount_ht: 9.9,
+                discount_amount_ht: 0,
+                final_amount_ht: 9.9,
+                currency: 'EUR',
+                promotion_code: null,
+                coupon_name: null,
+                coupon_percent_off: null,
+                coupon_amount_off: null,
+            },
+            stripePromotionCodeId: null,
+        });
+
+        stripeMock.customers.create.mockResolvedValue({ id: 'cus_123' });
+        stripeMock.subscriptions.create.mockResolvedValue({
+            id: 'sub_123',
+            status: 'incomplete',
+            items: { data: [{ id: 'si_123' }] },
+            latest_invoice: {
+                subtotal: 990,
+                total_discount_amounts: [],
+                confirmation_secret: { client_secret: 'secret_123' },
+                payment_intent: null,
+            },
+        });
+
+        await service.createRegistrationSubscription({
+            email: 'test@example.com',
+            password: 'Password123!',
+            first_name: 'Jean',
+            last_name: 'Dupont',
+            company_creation_mode: 'create',
+            company_name: 'Demo',
+            siren: '123456789',
+            role: 'merchant_admin',
+            plan_slug: 'essentiel',
+            billing_period: 'monthly',
+            platform_legal_accepted_at: new Date().toISOString(),
+        });
+
+        expect(stripeMock.subscriptions.create).toHaveBeenCalledWith(
+            expect.not.objectContaining({
+                discounts: expect.anything(),
+            }),
         );
     });
 });

@@ -129,8 +129,39 @@ export class CreateRegistrationSubscriptionDto {
     @IsIn(['monthly', 'yearly'])
     billing_period: 'monthly' | 'yearly';
 
+    @IsOptional()
+    @IsString()
+    promotion_code?: string;
+
     @IsISO8601()
     platform_legal_accepted_at: string;
+}
+
+export class RegistrationPricingDto {
+    original_amount_ht: number;
+    discount_amount_ht: number;
+    final_amount_ht: number;
+    currency: string;
+    promotion_code: string | null;
+    coupon_name: string | null;
+    coupon_percent_off: number | null;
+    coupon_amount_off: number | null;
+}
+
+export class ValidateRegistrationPromotionCodeDto {
+    @IsString()
+    plan_slug: string;
+
+    @IsIn(['monthly', 'yearly'])
+    billing_period: 'monthly' | 'yearly';
+
+    @IsString()
+    @IsNotEmpty()
+    promotion_code: string;
+}
+
+export class ValidateRegistrationPromotionCodeResponseDto {
+    pricing: RegistrationPricingDto;
 }
 
 export class RegistrationSubscriptionResponseDto {
@@ -138,6 +169,7 @@ export class RegistrationSubscriptionResponseDto {
     subscription_id: string;
     client_secret: string;
     status: string;
+    pricing: RegistrationPricingDto;
 }
 
 export class FinalizeRegistrationSubscriptionDto {

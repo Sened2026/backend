@@ -348,6 +348,27 @@ export class CompanyController {
     return this.companyService.inviteNewMerchantAdmin(userId, id, dto);
   }
 
+  @Get(":id/merchant-signup-invitations")
+  async getMerchantSignupInvitations(
+    @CurrentUser("id") userId: string,
+    @Param("id", ParseUUIDPipe) id: string,
+  ) {
+    return this.companyService.getMerchantSignupInvitations(userId, id);
+  }
+
+  @Delete(":id/merchant-signup-invitations/:invitationId")
+  async cancelMerchantSignupInvitation(
+    @CurrentUser("id") userId: string,
+    @Param("id", ParseUUIDPipe) id: string,
+    @Param("invitationId", ParseUUIDPipe) invitationId: string,
+  ) {
+    return this.companyService.cancelMerchantSignupInvitation(
+      userId,
+      id,
+      invitationId,
+    );
+  }
+
   @Get(":id/accountant-link-requests")
   async getAccountantLinkRequests(
     @CurrentUser("id") userId: string,
