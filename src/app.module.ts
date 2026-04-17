@@ -77,6 +77,7 @@ export class AppModule implements NestModule {
                 'api/invites/(.*)',
                 'api/siren/public-search',
                 'api/siren/public-lookup',
+                'api/siren/public-lookup-paged',
             )
             .forRoutes('*');
     }

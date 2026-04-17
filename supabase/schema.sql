@@ -112,11 +112,12 @@ ON CONFLICT (slug) DO NOTHING;
 
 -- ============================================
 -- TABLE: subscriptions
--- Abonnements des utilisateurs
+-- Abonnements par entreprise
 -- ============================================
 CREATE TABLE IF NOT EXISTS public.subscriptions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+    company_id UUID REFERENCES public.companies(id) ON DELETE CASCADE,
     plan_id UUID REFERENCES public.subscription_plans(id),
     stripe_customer_id VARCHAR(255),
     stripe_subscription_id VARCHAR(255),
@@ -129,12 +130,15 @@ CREATE TABLE IF NOT EXISTS public.subscriptions (
     stripe_base_item_id TEXT,
     billing_period TEXT DEFAULT 'monthly' CHECK (billing_period IN ('monthly', 'yearly')),
     created_at TIMESTAMPTZ DEFAULT TIMEZONE('utc', NOW()) NOT NULL,
-    updated_at TIMESTAMPTZ DEFAULT TIMEZONE('utc', NOW()) NOT NULL,
-    UNIQUE(user_id)
+    updated_at TIMESTAMPTZ DEFAULT TIMEZONE('utc', NOW()) NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS subscriptions_user_id_idx ON public.subscriptions(user_id);
+CREATE INDEX IF NOT EXISTS subscriptions_company_id_idx ON public.subscriptions(company_id);
 CREATE INDEX IF NOT EXISTS subscriptions_stripe_customer_id_idx ON public.subscriptions(stripe_customer_id);
+CREATE UNIQUE INDEX IF NOT EXISTS subscriptions_company_id_unique_idx
+    ON public.subscriptions(company_id)
+    WHERE company_id IS NOT NULL;
 
 DROP TRIGGER IF EXISTS on_subscriptions_updated ON public.subscriptions;
 CREATE TRIGGER on_subscriptions_updated
@@ -617,14 +621,41 @@ CREATE POLICY "Anyone can view active plans"
 -- ============================================
 -- POLICIES: subscriptions
 -- ============================================
-CREATE POLICY "Users can view own subscription"
+CREATE POLICY "Users can view company subscription"
     ON public.subscriptions FOR SELECT
-    USING (auth.uid() = user_id);
+    USING (
+        EXISTS (
+            SELECT 1
+            FROM public.user_companies uc
+            WHERE uc.company_id = subscriptions.company_id
+              AND uc.user_id = auth.uid()
+        )
+    );
 
-CREATE POLICY "Users can manage own subscription"
+CREATE POLICY "Owners can manage company subscription"
     ON public.subscriptions FOR ALL
-    USING (auth.uid() = user_id)
-    WITH CHECK (auth.uid() = user_id);
+    USING (
+        EXISTS (
+            SELECT 1
+            FROM public.companies c
+            JOIN public.user_companies uc ON uc.company_id = c.id
+            WHERE c.id = subscriptions.company_id
+              AND c.owner_id = auth.uid()
+              AND uc.user_id = auth.uid()
+              AND uc.role IN ('merchant_admin', 'accountant')
+        )
+    )
+    WITH CHECK (
+        EXISTS (
+            SELECT 1
+            FROM public.companies c
+            JOIN public.user_companies uc ON uc.company_id = c.id
+            WHERE c.id = subscriptions.company_id
+              AND c.owner_id = auth.uid()
+              AND uc.user_id = auth.uid()
+              AND uc.role IN ('merchant_admin', 'accountant')
+        )
+    );
 
 -- ============================================
 -- POLICIES: companies (via user_companies)
@@ -1317,9 +1348,10 @@ BEGIN
             LIMIT 1;
         END IF;
 
-        INSERT INTO public.subscriptions (user_id, plan_id, status)
+        INSERT INTO public.subscriptions (user_id, company_id, plan_id, status)
         VALUES (
             NEW.id,
+            v_company_id,
             v_plan_id,
             (CASE
                 WHEN v_role = 'accountant' THEN 'active'
@@ -1327,7 +1359,8 @@ BEGIN
                 ELSE 'incomplete'
             END)::subscription_status
         )
-        ON CONFLICT (user_id) DO UPDATE SET
+        ON CONFLICT (company_id) DO UPDATE SET
+            user_id = EXCLUDED.user_id,
             plan_id = EXCLUDED.plan_id,
             status = EXCLUDED.status;
     END IF;

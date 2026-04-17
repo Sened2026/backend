@@ -2,7 +2,7 @@ import { SirenRateLimitError } from './siren.types';
 import type { SirenSearchResult } from './siren.types';
 import { calculateVatNumber } from '../../shared/utils/business-identifiers.util';
 
-const DEFAULT_RETRY_AFTER_SECONDS = 60;
+const DEFAULT_RETRY_AFTER_SECONDS = 10;
 
 /**
  * Réponse JSON de l'API recherche-entreprises.api.gouv.fr
@@ -27,6 +27,8 @@ export interface ApiRechercheEntrepriseResponse {
         };
     }>;
     total_results: number;
+    page?: number;
+    per_page?: number;
 }
 
 export interface GouvUpstreamSearchResponse {
@@ -109,15 +111,20 @@ export class GouvRechercheEntreprisesProvider {
         };
     }
 
-    async fetchSearch(query: string, limit: number): Promise<GouvUpstreamSearchResponse> {
-        const response = await fetch(
-            `${this.API_BASE_URL}/search?q=${encodeURIComponent(query)}&per_page=${limit}`,
-            {
-                headers: {
-                    'User-Agent': this.userAgent,
-                },
+    async fetchSearch(query: string, limit: number, page?: number): Promise<GouvUpstreamSearchResponse> {
+        const params = new URLSearchParams({
+            q: query,
+            per_page: limit.toString(),
+        });
+        if (page && page > 1) {
+            params.set('page', page.toString());
+        }
+
+        const response = await fetch(`${this.API_BASE_URL}/search?${params.toString()}`, {
+            headers: {
+                'User-Agent': this.userAgent,
             },
-        );
+        });
 
         if (response.status === 429) {
             const retryAfterSeconds = this.parseRetryAfterSeconds(response.headers.get('Retry-After'));

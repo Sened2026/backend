@@ -1,8 +1,10 @@
-import { Injectable, NotFoundException, BadRequestException, ForbiddenException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, ForbiddenException, Inject, forwardRef } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Stripe from 'stripe';
 import { getSupabaseAdmin, getSupabaseClient } from '../../config/supabase.config';
 import { LegalDocumentService } from '../legal-document/legal-document.service';
+import { CompanyService } from '../company/company.service';
+import { CreateCompanyDto, CompanyWithRoleResponseDto } from '../company/dto/company.dto';
 import {
     hasUsableSubscription,
     hasUsableSubscriptionForCompanyOwnerRole,
@@ -14,17 +16,27 @@ import {
     SubscriptionWithPlansDto,
     SubscribeResponseDto,
     AvailablePlansResponseDto,
+    CompanyCreationSummaryDto,
+    CreatePendingCompanySubscriptionDto,
     CreateRegistrationSubscriptionDto,
+    FinalizePendingCompanySubscriptionResponseDto,
     RegistrationSubscriptionResponseDto,
     FinalizeRegistrationSubscriptionResponseDto,
     RegistrationPricingDto,
+    PendingCompanyPaymentSessionSummaryDto,
+    PendingCompanySubscriptionResponseDto,
+    ValidatePendingCompanyPromotionCodeDto,
+    ValidatePendingCompanyPromotionCodeResponseDto,
     ValidateRegistrationPromotionCodeDto,
     ValidateRegistrationPromotionCodeResponseDto,
+    ValidateSubscriptionPromotionCodeDto,
+    ValidateSubscriptionPromotionCodeResponseDto,
 } from './dto/subscription.dto';
 import { decryptRegistrationSecret, encryptRegistrationSecret } from '../../common/utils/registration-payload';
 import { normalizeBusinessIdentifiers } from '../../shared/utils/business-identifiers.util';
 
 const REGISTRATION_SUPPORT_EMAIL = 'contact@sened.fr';
+const INVALID_PROMO_CODE_MESSAGE = 'Le code promo est invalide.';
 
 interface RegistrationPaymentSessionRecord {
     id: string;
@@ -40,6 +52,24 @@ interface RegistrationPaymentSessionRecord {
     stripe_member_item_id: string | null;
     status: string;
     finalized_user_id: string | null;
+    expires_at: string;
+    created_at: string;
+    updated_at: string;
+}
+
+interface PendingCompanyPaymentSessionRecord {
+    id: string;
+    user_id: string;
+    company_data: CreateCompanyDto;
+    plan_id: string | null;
+    plan_slug: string | null;
+    billing_period: 'monthly' | 'yearly' | null;
+    stripe_customer_id: string | null;
+    stripe_subscription_id: string | null;
+    stripe_base_item_id: string | null;
+    stripe_member_item_id: string | null;
+    status: string;
+    finalized_company_id: string | null;
     expires_at: string;
     created_at: string;
     updated_at: string;
@@ -92,6 +122,8 @@ export class SubscriptionService {
     constructor(
         private configService: ConfigService,
         private readonly legalDocumentService: LegalDocumentService,
+        @Inject(forwardRef(() => CompanyService))
+        private readonly companyService: CompanyService,
     ) {
         const stripeKey = this.configService.get<string>('STRIPE_SECRET_KEY');
         if (stripeKey) {
@@ -509,6 +541,307 @@ export class SubscriptionService {
         };
     }
 
+    private normalizePendingCompanyData(
+        companyData?: CreateCompanyDto | null,
+    ): CreateCompanyDto {
+        const normalized = {
+            ...(companyData || {}),
+            owner_role: 'merchant_admin' as const,
+        };
+
+        if (!normalized.country) {
+            normalized.country = 'FR';
+        }
+
+        return normalized as CreateCompanyDto;
+    }
+
+    private async getPendingCompanyAccountantName(
+        accountantCompanyId?: string | null,
+    ): Promise<string | null> {
+        if (!accountantCompanyId) {
+            return null;
+        }
+
+        const supabase = getSupabaseAdmin();
+        const { data } = await supabase
+            .from('companies')
+            .select('name')
+            .eq('id', accountantCompanyId)
+            .maybeSingle();
+
+        return data?.name || null;
+    }
+
+    private async buildPendingCompanySummary(
+        companyData: CreateCompanyDto,
+    ): Promise<CompanyCreationSummaryDto> {
+        const normalized = this.normalizePendingCompanyData(companyData);
+        const accountantCompanyName = await this.getPendingCompanyAccountantName(
+            normalized.source_accountant_company_id,
+        );
+
+        return {
+            name: normalized.name,
+            legal_name: normalized.legal_name || null,
+            siren: normalized.siren || null,
+            address: normalized.address || null,
+            postal_code: normalized.postal_code || null,
+            city: normalized.city || null,
+            country: normalized.country || 'FR',
+            email: normalized.email || null,
+            phone: normalized.phone || null,
+            source_accountant_company_id:
+                normalized.source_accountant_company_id || null,
+            accountant_company_name: accountantCompanyName,
+        };
+    }
+
+    private async getPendingCompanySessionForUser(
+        userId: string,
+        sessionId: string,
+    ): Promise<PendingCompanyPaymentSessionRecord> {
+        const supabase = getSupabaseAdmin();
+        const { data: session, error } = await supabase
+            .from('pending_company_payment_sessions')
+            .select('*')
+            .eq('id', sessionId)
+            .eq('user_id', userId)
+            .maybeSingle();
+
+        if (error && error.code !== 'PGRST116') {
+            throw new BadRequestException(error.message);
+        }
+
+        if (!session) {
+            throw new NotFoundException('Session de création d’entreprise introuvable.');
+        }
+
+        return session as PendingCompanyPaymentSessionRecord;
+    }
+
+    private async getPendingCompanySessionByStripeSubscriptionId(
+        subscriptionId: string,
+    ): Promise<PendingCompanyPaymentSessionRecord | null> {
+        const supabase = getSupabaseAdmin();
+        const { data: session, error } = await supabase
+            .from('pending_company_payment_sessions')
+            .select('*')
+            .eq('stripe_subscription_id', subscriptionId)
+            .is('finalized_company_id', null)
+            .maybeSingle();
+
+        if (error && error.code !== 'PGRST116') {
+            throw new BadRequestException(error.message);
+        }
+
+        return (session as PendingCompanyPaymentSessionRecord | null) || null;
+    }
+
+    private async getPendingCompanySessionSummary(
+        session: PendingCompanyPaymentSessionRecord,
+    ): Promise<PendingCompanyPaymentSessionSummaryDto> {
+        let company: CompanyWithRoleResponseDto | null = null;
+        if (session.finalized_company_id) {
+            try {
+                company = await this.companyService.findOne(
+                    session.user_id,
+                    session.finalized_company_id,
+                );
+            } catch {
+                company = null;
+            }
+        }
+
+        return {
+            session_id: session.id,
+            status: session.status,
+            plan_slug: session.plan_slug,
+            billing_period: session.billing_period,
+            company_summary: await this.buildPendingCompanySummary(
+                session.company_data || {},
+            ),
+            finalized_company_id: session.finalized_company_id,
+            company,
+        };
+    }
+
+    private async cancelPendingCompanyStripeSubscription(
+        session: PendingCompanyPaymentSessionRecord,
+    ): Promise<void> {
+        if (!this.isStripeEnabled() || !session.stripe_subscription_id) {
+            return;
+        }
+
+        const stripe = this.ensureStripe();
+        try {
+            await stripe.subscriptions.cancel(session.stripe_subscription_id);
+        } catch (error: any) {
+            if (error?.code !== 'resource_missing') {
+                console.error(
+                    'Erreur annulation abonnement société en attente:',
+                    error,
+                );
+            }
+        }
+    }
+
+    private async getOrCreateStripeCustomerForUser(
+        stripe: Stripe,
+        supabase: any,
+        userId: string,
+        options?: { existingCustomerId?: string | null; companyName?: string | null },
+    ): Promise<string> {
+        if (options?.existingCustomerId) {
+            return options.existingCustomerId;
+        }
+
+        const { data: existingSubscription } = await supabase
+            .from('subscriptions')
+            .select('stripe_customer_id')
+            .eq('user_id', userId)
+            .not('stripe_customer_id', 'is', null)
+            .order('updated_at', { ascending: false })
+            .limit(1)
+            .maybeSingle();
+
+        if (existingSubscription?.stripe_customer_id) {
+            return existingSubscription.stripe_customer_id;
+        }
+
+        const { data: existingPendingSession } = await supabase
+            .from('pending_company_payment_sessions')
+            .select('stripe_customer_id')
+            .eq('user_id', userId)
+            .not('stripe_customer_id', 'is', null)
+            .order('updated_at', { ascending: false })
+            .limit(1)
+            .maybeSingle();
+
+        if (existingPendingSession?.stripe_customer_id) {
+            return existingPendingSession.stripe_customer_id;
+        }
+
+        const { data: profile } = await supabase
+            .from('profiles')
+            .select('email, first_name, last_name')
+            .eq('id', userId)
+            .single();
+
+        const customer = await stripe.customers.create({
+            email: profile?.email,
+            name:
+                options?.companyName
+                || [profile?.first_name, profile?.last_name].filter(Boolean).join(' ')
+                || undefined,
+            metadata: { user_id: userId },
+        });
+
+        return customer.id;
+    }
+
+    private buildSimplePlanPricing(
+        plan: SubscriptionPlanDto,
+        billingPeriod: 'monthly' | 'yearly',
+    ): RegistrationPricingDto {
+        const amount = billingPeriod === 'yearly'
+            ? Number(plan.price_yearly || 0)
+            : Number(plan.price_monthly || 0);
+
+        return {
+            original_amount_ht: Number(amount.toFixed(2)),
+            discount_amount_ht: 0,
+            final_amount_ht: Number(amount.toFixed(2)),
+            currency: 'EUR',
+            promotion_code: null,
+            coupon_name: null,
+            coupon_percent_off: null,
+            coupon_amount_off: null,
+        };
+    }
+
+    private async upsertPendingCompanyLocalSubscription(
+        companyId: string,
+        userId: string,
+        session: PendingCompanyPaymentSessionRecord,
+        stripeSubscription: Stripe.Subscription | null,
+    ): Promise<void> {
+        const supabase = getSupabaseAdmin();
+        const baseItem = stripeSubscription
+            ? this.getBaseItem(stripeSubscription, session.stripe_base_item_id)
+            : undefined;
+        const memberItem = stripeSubscription
+            ? stripeSubscription.items.data.find((item) => item.id !== baseItem?.id)
+            : undefined;
+        const payload = {
+            user_id: userId,
+            company_id: companyId,
+            plan_id: session.plan_id,
+            stripe_customer_id:
+                session.stripe_customer_id
+                || (typeof stripeSubscription?.customer === 'string'
+                    ? stripeSubscription.customer
+                    : stripeSubscription?.customer?.id || null),
+            stripe_subscription_id: session.stripe_subscription_id,
+            stripe_base_item_id: baseItem?.id || session.stripe_base_item_id,
+            stripe_member_item_id: memberItem?.id || null,
+            extra_members_quantity: memberItem?.quantity || 0,
+            billing_period:
+                (baseItem?.price?.recurring?.interval === 'year'
+                    ? 'yearly'
+                    : session.billing_period || 'monthly') as 'monthly' | 'yearly',
+            status: stripeSubscription
+                ? this.mapStripeStatus(stripeSubscription.status)
+                : 'active',
+            current_period_start: new Date().toISOString(),
+            current_period_end: stripeSubscription
+                ? this.getPeriodEndFromSubscription(
+                    stripeSubscription,
+                    session.stripe_base_item_id,
+                )
+                : null,
+            updated_at: new Date().toISOString(),
+        };
+
+        const { data: existingSubscription } = await supabase
+            .from('subscriptions')
+            .select('id')
+            .eq('company_id', companyId)
+            .maybeSingle();
+
+        if (existingSubscription?.id) {
+            const { error } = await supabase
+                .from('subscriptions')
+                .update(payload)
+                .eq('company_id', companyId);
+
+            if (error) {
+                throw new BadRequestException(error.message);
+            }
+
+            return;
+        }
+
+        const { error } = await supabase
+            .from('subscriptions')
+            .insert({
+                ...payload,
+                created_at: new Date().toISOString(),
+            });
+
+        if (error) {
+            throw new BadRequestException(error.message);
+        }
+    }
+
+    private normalizePendingCompanyPromotionError(error: any): never {
+        throw new BadRequestException(
+            error instanceof BadRequestException
+                ? INVALID_PROMO_CODE_MESSAGE
+                : INVALID_PROMO_CODE_MESSAGE,
+        );
+    }
+
     private async loadPromotionCoupon(
         stripe: Stripe,
         promotionCode: any,
@@ -787,6 +1120,19 @@ export class SubscriptionService {
         subscription: Stripe.Subscription,
     ): Promise<void> {
         const supabase = getSupabaseAdmin();
+        const { data: createdCompanies } = await supabase
+            .from('companies')
+            .select('id')
+            .eq('owner_id', userId)
+            .order('created_at', { ascending: false })
+            .limit(1);
+        const targetCompanyId = createdCompanies?.[0]?.id || null;
+        if (!targetCompanyId) {
+            throw new BadRequestException(
+                'Impossible de rattacher l’abonnement à une entreprise après l’inscription.',
+            );
+        }
+
         const baseItem = this.getBaseItem(subscription, session.stripe_base_item_id);
         const memberItem = subscription.items.data.find((item) => item.id !== baseItem?.id);
         const billingPeriod = baseItem?.price?.recurring?.interval === 'year' ? 'yearly' : session.billing_period;
@@ -794,7 +1140,7 @@ export class SubscriptionService {
         const { data: existingSubscription } = await supabase
             .from('subscriptions')
             .select('id')
-            .eq('user_id', userId)
+            .eq('company_id', targetCompanyId)
             .maybeSingle();
 
         const payload = {
@@ -815,7 +1161,7 @@ export class SubscriptionService {
             const { error } = await supabase
                 .from('subscriptions')
                 .update(payload)
-                .eq('user_id', userId);
+                .eq('company_id', targetCompanyId);
 
             if (error) {
                 throw new BadRequestException(error.message);
@@ -828,6 +1174,7 @@ export class SubscriptionService {
             .from('subscriptions')
             .insert({
                 user_id: userId,
+                company_id: targetCompanyId,
                 ...payload,
                 created_at: new Date().toISOString(),
             });
@@ -882,6 +1229,105 @@ export class SubscriptionService {
         return 'completed';
     }
 
+    private async finalizePendingCompanySessionRecord(
+        session: PendingCompanyPaymentSessionRecord,
+    ): Promise<{ status: 'completed' | 'processing'; company_id: string | null }> {
+        const supabase = getSupabaseAdmin();
+
+        if (session.finalized_company_id) {
+            return {
+                status: 'completed',
+                company_id: session.finalized_company_id,
+            };
+        }
+
+        const companyData = this.normalizePendingCompanyData(session.company_data);
+        if (!companyData.name?.trim()) {
+            throw new BadRequestException(
+                'Les informations de l’entreprise à créer sont incomplètes.',
+            );
+        }
+
+        if (!session.plan_id) {
+            throw new BadRequestException(
+                'Aucun forfait n’a encore été sélectionné pour cette entreprise.',
+            );
+        }
+
+        if (!this.isStripeEnabled() || !session.stripe_subscription_id) {
+            const company = await this.companyService.create(
+                session.user_id,
+                companyData,
+            );
+
+            await this.upsertPendingCompanyLocalSubscription(
+                company.id,
+                session.user_id,
+                session,
+                null,
+            );
+
+            await supabase
+                .from('pending_company_payment_sessions')
+                .update({
+                    finalized_company_id: company.id,
+                    status: 'completed',
+                })
+                .eq('id', session.id);
+
+            return {
+                status: 'completed',
+                company_id: company.id,
+            };
+        }
+
+        const stripe = this.ensureStripe();
+        const stripeSubscription = await stripe.subscriptions.retrieve(
+            session.stripe_subscription_id,
+            { expand: ['latest_invoice.payment_intent'] },
+        );
+        const latestInvoice = stripeSubscription.latest_invoice as Stripe.Invoice | null;
+
+        if (!this.isStripePaymentSettled(stripeSubscription, latestInvoice)) {
+            await supabase
+                .from('pending_company_payment_sessions')
+                .update({
+                    status: this.mapStripeStatus(stripeSubscription.status),
+                })
+                .eq('id', session.id);
+
+            return {
+                status: 'processing',
+                company_id: null,
+            };
+        }
+
+        const company = await this.companyService.create(
+            session.user_id,
+            companyData,
+        );
+
+        await this.upsertPendingCompanyLocalSubscription(
+            company.id,
+            session.user_id,
+            session,
+            stripeSubscription,
+        );
+
+        await supabase
+            .from('pending_company_payment_sessions')
+            .update({
+                finalized_company_id: company.id,
+                status: 'completed',
+            })
+            .eq('id', session.id);
+
+        return {
+            status: 'completed',
+            company_id: company.id,
+        };
+    }
+
     private async getAvailablePlansFromDb(supabase: any): Promise<SubscriptionPlanDto[]> {
         const { data, error } = await supabase
             .from('subscription_plans')
@@ -900,11 +1346,18 @@ export class SubscriptionService {
         return plans.find((plan) => plan.slug === 'essentiel') || plans[0] || null;
     }
 
-    private async getRawSubscriptionForUser(supabase: any, userId: string): Promise<any | null> {
+    private async getRawSubscriptionForCompany(
+        supabase: any,
+        companyId: string | null,
+    ): Promise<any | null> {
+        if (!companyId) {
+            return null;
+        }
+
         const { data: subscription, error } = await supabase
             .from('subscriptions')
             .select('*')
-            .eq('user_id', userId)
+            .eq('company_id', companyId)
             .maybeSingle();
 
         if (error && error.code !== 'PGRST116') {
@@ -914,8 +1367,25 @@ export class SubscriptionService {
         return subscription;
     }
 
-    private async ensureBypassSubscriptionForUser(
+    private async getRawSubscriptionForUser(supabase: any, userId: string): Promise<any | null> {
+        const { data: subscriptions, error } = await supabase
+            .from('subscriptions')
+            .select('*')
+            .eq('user_id', userId)
+            .order('created_at', { ascending: false })
+            .limit(1);
+
+        if (error && error.code !== 'PGRST116') {
+            throw new Error(`Erreur lors de la récupération de l'abonnement: ${error.message}`);
+        }
+
+        return subscriptions?.[0] || null;
+    }
+
+    private async ensureBypassSubscriptionForCompany(
         supabase: any,
+        ownerUserId: string | null,
+        companyId: string | null,
         userId: string | null,
         plans: SubscriptionPlanDto[],
         existingSubscription?: any | null,
@@ -924,7 +1394,7 @@ export class SubscriptionService {
             return existingSubscription || null;
         }
 
-        const subscription = existingSubscription ?? await this.getRawSubscriptionForUser(supabase, userId);
+        const subscription = existingSubscription ?? await this.getRawSubscriptionForCompany(supabase, companyId);
         if (this.isStripeEnabled()) {
             return subscription;
         }
@@ -958,7 +1428,8 @@ export class SubscriptionService {
         }
 
         const insertedSubscription = {
-            user_id: userId,
+            user_id: ownerUserId || userId,
+            company_id: companyId,
             plan_id: defaultPlan.id,
             status: 'active',
             extra_members_quantity: 0,
@@ -1106,25 +1577,89 @@ export class SubscriptionService {
         };
     }
 
+    private async getUsageForCompanyRole(
+        supabase: any,
+        companyId: string | null,
+        ownerRole: 'merchant_admin' | 'accountant',
+    ) {
+        if (!companyId) {
+            return {
+                invoices_this_month: 0,
+                quotes_this_month: 0,
+                ...buildSubscriptionMemberUsage(0, 0, ownerRole),
+            };
+        }
+
+        const startOfMonth = new Date();
+        startOfMonth.setDate(1);
+        startOfMonth.setHours(0, 0, 0, 0);
+
+        const { count: invoiceCount } = await supabase
+            .from('invoices')
+            .select('*', { count: 'exact', head: true })
+            .eq('company_id', companyId)
+            .gte('created_at', startOfMonth.toISOString());
+
+        const { count: quoteCount } = await supabase
+            .from('quotes')
+            .select('*', { count: 'exact', head: true })
+            .eq('company_id', companyId)
+            .gte('created_at', startOfMonth.toISOString());
+
+        const { count: memberCount } = await supabase
+            .from('user_companies')
+            .select('*', { count: 'exact', head: true })
+            .eq('company_id', companyId);
+
+        const { count: billableMemberCount } = await supabase
+            .from('user_companies')
+            .select('*', { count: 'exact', head: true })
+            .eq('company_id', companyId)
+            .in('role', ['merchant_admin', 'merchant_consultant']);
+
+        const { count: pendingInvitationCount } = await supabase
+            .from('company_invitations')
+            .select('*', { count: 'exact', head: true })
+            .eq('company_id', companyId)
+            .eq('invitation_type', 'member')
+            .in('role', ['merchant_admin', 'merchant_consultant'])
+            .is('accepted_at', null)
+            .gt('expires_at', new Date().toISOString());
+
+        return {
+            invoices_this_month: invoiceCount || 0,
+            quotes_this_month: quoteCount || 0,
+            ...buildSubscriptionMemberUsage(
+                memberCount || 0,
+                pendingInvitationCount || 0,
+                ownerRole,
+                billableMemberCount || 0,
+            ),
+        };
+    }
+
     async getSubscriptionWithPlans(userId: string, companyId?: string): Promise<SubscriptionWithPlansDto> {
         const supabase = getSupabaseAdmin();
         const allPlans = await this.getAvailablePlansFromDb(supabase);
         const effectiveTarget = await resolveEffectiveSubscriptionTarget(userId, companyId);
 
-        let subscription = effectiveTarget.subscription_user_id
-            ? await this.getRawSubscriptionForUser(supabase, effectiveTarget.subscription_user_id)
+        let subscription = effectiveTarget.subscription_company_id
+            ? await this.getRawSubscriptionForCompany(supabase, effectiveTarget.subscription_company_id)
             : null;
 
-        subscription = await this.ensureBypassSubscriptionForUser(
+        subscription = await this.ensureBypassSubscriptionForCompany(
             supabase,
-            effectiveTarget.subscription_user_id,
+            effectiveTarget.owner_user_id,
+            effectiveTarget.subscription_company_id,
+            effectiveTarget.owner_user_id || userId,
             allPlans,
             subscription,
         );
 
-        const usage = await this.getUsageForOwner(
+        const usage = await this.getUsageForCompanyRole(
             supabase,
-            effectiveTarget.owner_user_id || effectiveTarget.subscription_user_id,
+            effectiveTarget.subscription_company_id,
+            effectiveTarget.company_owner_role || 'merchant_admin',
         );
 
         return {
@@ -1136,6 +1671,7 @@ export class SubscriptionService {
             company_owner_role: effectiveTarget.company_owner_role,
             is_company_linked_to_accountant_cabinet:
                 effectiveTarget.is_selected_company_linked_to_accountant_cabinet,
+            is_invited_merchant_admin: effectiveTarget.is_invited_merchant_admin,
             can_manage_billing: effectiveTarget.can_manage_billing,
             has_any_active_company_subscription: effectiveTarget.has_any_active_company_subscription,
             usage,
@@ -1144,14 +1680,8 @@ export class SubscriptionService {
 
     async getUserSubscription(userId: string): Promise<SubscriptionDto | null> {
         const supabase = getSupabaseAdmin();
-        const allPlans = await this.getAvailablePlansFromDb(supabase);
-        const subscription = await this.ensureBypassSubscriptionForUser(
-            supabase,
-            userId,
-            allPlans,
-        );
-
-        return this.hydrateSubscription(supabase, subscription);
+        const subscription = await this.getRawSubscriptionForUser(supabase, userId);
+        return this.hydrateSubscription(supabase, subscription || null);
     }
 
     async getAvailablePlans(): Promise<AvailablePlansResponseDto> {
@@ -1163,6 +1693,298 @@ export class SubscriptionService {
         };
     }
 
+    async getPendingCompanyPaymentSessionSummary(
+        userId: string,
+        sessionId: string,
+    ): Promise<PendingCompanyPaymentSessionSummaryDto> {
+        const session = await this.getPendingCompanySessionForUser(userId, sessionId);
+        return this.getPendingCompanySessionSummary(session);
+    }
+
+    async createPendingCompanySubscription(
+        userId: string,
+        dto: CreatePendingCompanySubscriptionDto,
+    ): Promise<PendingCompanySubscriptionResponseDto> {
+        const supabase = getSupabaseAdmin();
+
+        let session: PendingCompanyPaymentSessionRecord | null = null;
+        if (dto.session_id) {
+            session = await this.getPendingCompanySessionForUser(userId, dto.session_id);
+        }
+
+        const companyData = dto.company_data
+            ? this.normalizePendingCompanyData(dto.company_data)
+            : this.normalizePendingCompanyData(session?.company_data);
+
+        if (!companyData.name?.trim()) {
+            throw new BadRequestException(
+                'Les informations de l’entreprise à créer sont incomplètes.',
+            );
+        }
+
+        const normalizedCompanyData = this.normalizePendingCompanyData(companyData);
+
+        if (session?.finalized_company_id) {
+            return {
+                session_id: session.id,
+                subscription_id: session.stripe_subscription_id,
+                client_secret: null,
+                status: 'completed',
+                pricing: null,
+                company_summary: await this.buildPendingCompanySummary(
+                    normalizedCompanyData,
+                ),
+            };
+        }
+
+        if (!session) {
+            const { data: createdSession, error } = await supabase
+                .from('pending_company_payment_sessions')
+                .insert({
+                    user_id: userId,
+                    company_data: normalizedCompanyData,
+                    status: 'draft',
+                })
+                .select('*')
+                .single();
+
+            if (error || !createdSession) {
+                throw new BadRequestException(
+                    error?.message
+                        || 'Impossible de préparer la création de l’entreprise.',
+                );
+            }
+
+            session = createdSession as PendingCompanyPaymentSessionRecord;
+        } else {
+            const { data: updatedSession, error } = await supabase
+                .from('pending_company_payment_sessions')
+                .update({
+                    company_data: normalizedCompanyData,
+                    updated_at: new Date().toISOString(),
+                })
+                .eq('id', session.id)
+                .select('*')
+                .single();
+
+            if (error || !updatedSession) {
+                throw new BadRequestException(
+                    error?.message
+                        || 'Impossible de mettre à jour la session de création.',
+                );
+            }
+
+            session = updatedSession as PendingCompanyPaymentSessionRecord;
+        }
+
+        const companySummary = await this.buildPendingCompanySummary(
+            normalizedCompanyData,
+        );
+
+        if (!dto.plan_slug || !dto.billing_period) {
+            return {
+                session_id: session.id,
+                subscription_id: session.stripe_subscription_id,
+                client_secret: null,
+                status: session.status || 'draft',
+                pricing: null,
+                company_summary: companySummary,
+            };
+        }
+
+        if (!this.isStripeEnabled()) {
+            const plans = await this.getAvailablePlansFromDb(supabase);
+            const plan = plans.find((entry) => entry.slug === dto.plan_slug);
+            if (!plan) {
+                throw new NotFoundException(`Plan "${dto.plan_slug}" non trouvé`);
+            }
+
+            const pricing = this.buildSimplePlanPricing(plan, dto.billing_period);
+            const { data: updatedSession, error } = await supabase
+                .from('pending_company_payment_sessions')
+                .update({
+                    company_data: normalizedCompanyData,
+                    plan_id: plan.id,
+                    plan_slug: dto.plan_slug,
+                    billing_period: dto.billing_period,
+                    status: 'active',
+                    stripe_subscription_id: null,
+                    stripe_base_item_id: null,
+                    stripe_member_item_id: null,
+                    updated_at: new Date().toISOString(),
+                })
+                .eq('id', session.id)
+                .select('*')
+                .single();
+
+            if (error || !updatedSession) {
+                throw new BadRequestException(
+                    error?.message || 'Impossible de préparer la souscription.',
+                );
+            }
+
+            return {
+                session_id: session.id,
+                subscription_id: null,
+                client_secret: null,
+                status: 'active',
+                pricing,
+                company_summary: companySummary,
+            };
+        }
+
+        const stripe = this.ensureStripe();
+        const pricingContext = await this.resolveRegistrationPricingContext(
+            dto.plan_slug,
+            dto.billing_period,
+            dto.promotion_code,
+        );
+
+        if (
+            session.status
+            && ['active', 'trialing'].includes(session.status)
+            && session.stripe_subscription_id
+        ) {
+            throw new BadRequestException(
+                'Cette session de paiement a déjà été validée.',
+            );
+        }
+
+        await this.cancelPendingCompanyStripeSubscription(session);
+
+        const customerId = await this.getOrCreateStripeCustomerForUser(
+            stripe,
+            supabase,
+            userId,
+            {
+                existingCustomerId: session.stripe_customer_id,
+                companyName: companySummary.legal_name || companySummary.name,
+            },
+        );
+
+        const stripeSubscription = await stripe.subscriptions.create({
+            customer: customerId,
+            items: [{ price: pricingContext.basePriceId, quantity: 1 }],
+            billing_mode: { type: 'flexible' },
+            payment_behavior: 'default_incomplete',
+            payment_settings: {
+                save_default_payment_method: 'on_subscription',
+                payment_method_types: ['card', 'sepa_debit'],
+            },
+            discounts: pricingContext.stripePromotionCodeId
+                ? [{ promotion_code: pricingContext.stripePromotionCodeId }]
+                : undefined,
+            metadata: {
+                pending_company_session_id: session.id,
+                pending_company_flow: 'true',
+                user_id: userId,
+                plan_id: pricingContext.plan.id,
+                billing_period: dto.billing_period,
+            },
+            expand: ['latest_invoice.confirmation_secret', 'latest_invoice.payment_intent'],
+        });
+
+        const latestInvoice = stripeSubscription.latest_invoice as Stripe.Invoice | null;
+        const confirmationSecret = (latestInvoice as any)?.confirmation_secret as
+            | { client_secret?: string | null }
+            | null;
+        const paymentIntent = (latestInvoice as any)?.payment_intent as Stripe.PaymentIntent | null;
+        const clientSecret = confirmationSecret?.client_secret || paymentIntent?.client_secret || null;
+        const appliedPricing = this.buildRegistrationPricingFromInvoice(
+            latestInvoice,
+            pricingContext.pricing,
+        );
+
+        if (!clientSecret) {
+            throw new BadRequestException(
+                'Le service de paiement n’a pas pu initialiser le paiement. Réessayez dans quelques instants.',
+            );
+        }
+
+        const { error: updateError } = await supabase
+            .from('pending_company_payment_sessions')
+            .update({
+                company_data: normalizedCompanyData,
+                plan_id: pricingContext.plan.id,
+                plan_slug: dto.plan_slug,
+                billing_period: dto.billing_period,
+                stripe_customer_id: customerId,
+                stripe_subscription_id: stripeSubscription.id,
+                stripe_base_item_id: stripeSubscription.items.data[0]?.id || null,
+                stripe_member_item_id: null,
+                status: this.mapStripeStatus(stripeSubscription.status),
+                updated_at: new Date().toISOString(),
+            })
+            .eq('id', session.id);
+
+        if (updateError) {
+            throw new BadRequestException(updateError.message);
+        }
+
+        return {
+            session_id: session.id,
+            subscription_id: stripeSubscription.id,
+            client_secret: clientSecret,
+            status: stripeSubscription.status,
+            pricing: appliedPricing,
+            company_summary: companySummary,
+        };
+    }
+
+    async validatePendingCompanyPromotionCode(
+        userId: string,
+        dto: ValidatePendingCompanyPromotionCodeDto,
+    ): Promise<ValidatePendingCompanyPromotionCodeResponseDto> {
+        await this.getPendingCompanySessionForUser(userId, dto.session_id);
+
+        if (!this.isStripeEnabled()) {
+            throw new BadRequestException(
+                'Le paiement est temporairement indisponible. Réessayez dans quelques instants.',
+            );
+        }
+
+        try {
+            const pricingContext = await this.resolveRegistrationPricingContext(
+                dto.plan_slug,
+                dto.billing_period,
+                dto.promotion_code,
+            );
+
+            return {
+                pricing: pricingContext.pricing,
+            };
+        } catch (error: any) {
+            this.normalizePendingCompanyPromotionError(error);
+        }
+    }
+
+    async finalizePendingCompanySubscription(
+        userId: string,
+        sessionId: string,
+    ): Promise<FinalizePendingCompanySubscriptionResponseDto> {
+        const session = await this.getPendingCompanySessionForUser(userId, sessionId);
+        const result = await this.finalizePendingCompanySessionRecord(session);
+
+        if (result.status === 'processing') {
+            return {
+                status: 'processing',
+                message:
+                    'Le paiement est en cours de confirmation. L’entreprise sera créée automatiquement dès validation.',
+                company: null,
+            };
+        }
+
+        const company = result.company_id
+            ? await this.companyService.findOne(userId, result.company_id)
+            : null;
+
+        return {
+            status: 'completed',
+            message: 'L’entreprise a été créée et l’abonnement est actif.',
+            company,
+        };
+    }
+
     /**
      * Get or create a Stripe customer for this user.
      */
@@ -1170,15 +1992,33 @@ export class SubscriptionService {
         stripe: Stripe,
         supabase: any,
         userId: string,
+        companyId: string,
     ): Promise<string> {
-        const { data: subscription } = await supabase
+        const { data: companySubscription } = await supabase
+            .from('subscriptions')
+            .select('stripe_customer_id')
+            .eq('company_id', companyId)
+            .maybeSingle();
+
+        if (companySubscription?.stripe_customer_id) {
+            return companySubscription.stripe_customer_id;
+        }
+
+        const { data: existingCustomerSubscription } = await supabase
             .from('subscriptions')
             .select('stripe_customer_id')
             .eq('user_id', userId)
+            .not('stripe_customer_id', 'is', null)
+            .order('updated_at', { ascending: false })
+            .limit(1)
             .maybeSingle();
 
-        if (subscription?.stripe_customer_id) {
-            return subscription.stripe_customer_id;
+        if (existingCustomerSubscription?.stripe_customer_id) {
+            await supabase
+                .from('subscriptions')
+                .update({ stripe_customer_id: existingCustomerSubscription.stripe_customer_id })
+                .eq('company_id', companyId);
+            return existingCustomerSubscription.stripe_customer_id;
         }
 
         const { data: profile } = await supabase
@@ -1194,17 +2034,18 @@ export class SubscriptionService {
         });
 
         // Ensure subscription row exists, then set customer id
-        const existingSub = await this.getRawSubscriptionForUser(supabase, userId);
+        const existingSub = await this.getRawSubscriptionForCompany(supabase, companyId);
         if (existingSub) {
             await supabase
                 .from('subscriptions')
                 .update({ stripe_customer_id: customer.id })
-                .eq('user_id', userId);
+                .eq('company_id', companyId);
         } else {
             await supabase
                 .from('subscriptions')
                 .insert({
                     user_id: userId,
+                    company_id: companyId,
                     stripe_customer_id: customer.id,
                     status: 'incomplete',
                     extra_members_quantity: 0,
@@ -1379,6 +2220,35 @@ export class SubscriptionService {
         };
     }
 
+    async validateSubscriptionPromotionCode(
+        userId: string,
+        dto: ValidateSubscriptionPromotionCodeDto,
+        explicitCompanyId?: string | null,
+    ): Promise<ValidateSubscriptionPromotionCodeResponseDto> {
+        if (!this.isStripeEnabled()) {
+            throw new BadRequestException(
+                'Le paiement est temporairement indisponible. Réessayez dans quelques instants.',
+            );
+        }
+
+        const effectiveTarget = await resolveEffectiveSubscriptionTarget(userId, explicitCompanyId);
+        if (!effectiveTarget.can_manage_billing) {
+            throw new ForbiddenException(
+                'La facturation est gérée par le propriétaire de l\'entreprise.',
+            );
+        }
+
+        const pricingContext = await this.resolveRegistrationPricingContext(
+            dto.plan_slug,
+            dto.billing_period,
+            dto.promotion_code,
+        );
+
+        return {
+            pricing: pricingContext.pricing,
+        };
+    }
+
     async finalizeRegistrationSubscription(
         registrationSessionId: string,
     ): Promise<FinalizeRegistrationSubscriptionResponseDto> {
@@ -1417,13 +2287,17 @@ export class SubscriptionService {
     }
 
     /**
-     * Count extra members (total active members across owner's companies - 1 for owner).
+     * Count extra members for a specific company.
      */
-    private async countExtraMembers(supabase: any, userId: string): Promise<number> {
-        const usage = await this.getUsageForOwnerRole(
+    private async countExtraMembers(
+        supabase: any,
+        companyId: string | null,
+        ownerRole: 'merchant_admin' | 'accountant',
+    ): Promise<number> {
+        const usage = await this.getUsageForCompanyRole(
             supabase,
-            userId,
-            'merchant_admin',
+            companyId,
+            ownerRole,
         );
 
         return usage.billable_extra_members;
@@ -1441,46 +2315,65 @@ export class SubscriptionService {
         userId: string,
         planSlug: string,
         billingPeriod: 'monthly' | 'yearly',
+        promotionCodeInput?: string | null,
+        explicitCompanyId?: string | null,
     ): Promise<SubscribeResponseDto> {
         await this.legalDocumentService.ensurePlatformAcceptanceCurrent(userId);
         const supabase = getSupabaseAdmin();
-        const effectiveTarget = await resolveEffectiveSubscriptionTarget(userId);
+        const effectiveTarget = await resolveEffectiveSubscriptionTarget(userId, explicitCompanyId);
+        const subscriptionCompanyId = effectiveTarget.subscription_company_id;
+        const ownerUserId = effectiveTarget.owner_user_id || userId;
+        const ownerRole = effectiveTarget.company_owner_role || 'merchant_admin';
 
         if (!effectiveTarget.can_manage_billing) {
             throw new ForbiddenException(
                 'La facturation est gérée par le propriétaire de l\'entreprise.',
             );
         }
-
-        const { data: plan, error: planError } = await supabase
-            .from('subscription_plans')
-            .select('*')
-            .eq('slug', planSlug)
-            .eq('is_active', true)
-            .single();
-
-        if (planError || !plan) {
-            throw new NotFoundException(`Plan "${planSlug}" non trouvé`);
+        if (!subscriptionCompanyId) {
+            throw new BadRequestException(
+                'Impossible de déterminer l’entreprise à facturer pour cet abonnement.',
+            );
         }
+
+        let pricingContext: ResolvedRegistrationPricingContext | null = null;
+        let plan: any = null;
 
         // Bypass Stripe si désactivé
         if (!this.isStripeEnabled()) {
-            const existingSub = await this.getRawSubscriptionForUser(supabase, userId);
+            const { data: selectedPlan, error: planError } = await supabase
+                .from('subscription_plans')
+                .select('*')
+                .eq('slug', planSlug)
+                .eq('is_active', true)
+                .single();
+
+            if (planError || !selectedPlan) {
+                throw new NotFoundException(`Plan "${planSlug}" non trouvé`);
+            }
+
+            plan = selectedPlan;
+            const existingSub = await this.getRawSubscriptionForCompany(
+                supabase,
+                subscriptionCompanyId,
+            );
             if (existingSub) {
                 await supabase
                     .from('subscriptions')
                     .update({
+                        user_id: ownerUserId,
                         plan_id: plan.id,
                         status: 'active',
                         billing_period: billingPeriod,
                         updated_at: new Date().toISOString(),
                     })
-                    .eq('user_id', userId);
+                    .eq('company_id', subscriptionCompanyId);
             } else {
                 await supabase
                     .from('subscriptions')
                     .insert({
-                        user_id: userId,
+                        user_id: ownerUserId,
+                        company_id: subscriptionCompanyId,
                         plan_id: plan.id,
                         status: 'active',
                         billing_period: billingPeriod,
@@ -1498,14 +2391,24 @@ export class SubscriptionService {
         }
 
         const stripe = this.ensureStripe();
+        pricingContext = await this.resolveRegistrationPricingContext(
+            planSlug,
+            billingPeriod,
+            promotionCodeInput,
+        );
+        plan = pricingContext.plan;
+        const activePricingContext = pricingContext as ResolvedRegistrationPricingContext;
 
-        // Guard against duplicate subscriptions
-        const existingSub = await this.getRawSubscriptionForUser(supabase, userId);
+        // Guard against duplicate subscriptions (per company)
+        const existingSub = await this.getRawSubscriptionForCompany(
+            supabase,
+            subscriptionCompanyId,
+        );
         if (existingSub) {
             // Cas 1: vrai abonnement Stripe actif → refuser
             if (['active', 'trialing'].includes(existingSub.status) && existingSub.stripe_subscription_id) {
                 throw new BadRequestException(
-                    'Vous avez déjà un abonnement actif. Utilisez le changement de plan.',
+                    'Cette entreprise a déjà un abonnement actif. Utilisez le changement de plan.',
                 );
             }
             // Cas 1b: subscription 'active' sans Stripe (créée par le trigger DB) → réinitialiser
@@ -1513,7 +2416,7 @@ export class SubscriptionService {
                 await supabase
                     .from('subscriptions')
                     .update({ status: 'incomplete', updated_at: new Date().toISOString() })
-                    .eq('user_id', userId);
+                    .eq('company_id', subscriptionCompanyId);
             }
             // Cas 2: abonnement incomplete/past_due avec stripe_subscription_id → annuler l'ancien
             if (['incomplete', 'past_due'].includes(existingSub.status) && existingSub.stripe_subscription_id) {
@@ -1534,17 +2437,20 @@ export class SubscriptionService {
                         status: 'incomplete',
                         updated_at: new Date().toISOString(),
                     })
-                    .eq('user_id', userId);
+                    .eq('company_id', subscriptionCompanyId);
             }
             // Cas 3: ligne locale sans stripe_subscription_id → on la réutilise (mise à jour plus loin)
         }
 
         // Resolve base price
-        const baseLookupKey = this.resolveLookupKey(plan, billingPeriod);
-        const basePriceId = await this.resolveStripePriceId(stripe, baseLookupKey);
+        const basePriceId = activePricingContext.basePriceId;
 
         // Count extra members
-        const extraMembers = await this.countExtraMembers(supabase, userId);
+        const extraMembers = await this.countExtraMembers(
+            supabase,
+            subscriptionCompanyId,
+            ownerRole,
+        );
 
         // Resolve member addon price if needed
         let memberPriceId: string | null = null;
@@ -1558,7 +2464,12 @@ export class SubscriptionService {
         }
 
         // Get or create Stripe customer
-        const stripeCustomerId = await this.getOrCreateStripeCustomer(stripe, supabase, userId);
+        const stripeCustomerId = await this.getOrCreateStripeCustomer(
+            stripe,
+            supabase,
+            ownerUserId,
+            subscriptionCompanyId,
+        );
 
         // Build subscription items
         const items: Stripe.SubscriptionCreateParams.Item[] = [
@@ -1571,7 +2482,7 @@ export class SubscriptionService {
 
         // Create subscription with payment_behavior: default_incomplete
         // to get a client_secret for Stripe Elements.
-        const stripeSub = await stripe.subscriptions.create({
+        const subscriptionParams: Stripe.SubscriptionCreateParams = {
             customer: stripeCustomerId,
             items,
             billing_mode: { type: 'flexible' },
@@ -1581,12 +2492,20 @@ export class SubscriptionService {
                 payment_method_types: ['card', 'sepa_debit'],
             },
             metadata: {
-                user_id: userId,
+                user_id: ownerUserId,
+                company_id: subscriptionCompanyId,
                 plan_id: plan.id,
                 billing_period: billingPeriod,
+                promotion_code: activePricingContext.pricing.promotion_code || '',
             },
             expand: ['latest_invoice.confirmation_secret', 'latest_invoice.payment_intent'],
-        });
+        };
+        if (activePricingContext.stripePromotionCodeId) {
+            subscriptionParams.discounts = [{
+                promotion_code: activePricingContext.stripePromotionCodeId,
+            }];
+        }
+        const stripeSub = await stripe.subscriptions.create(subscriptionParams);
 
         // Extract item IDs
         const baseItemId = stripeSub.items.data[0]?.id || null;
@@ -1598,6 +2517,7 @@ export class SubscriptionService {
         await supabase
             .from('subscriptions')
             .update({
+                user_id: ownerUserId,
                 plan_id: plan.id,
                 stripe_customer_id: stripeCustomerId,
                 stripe_subscription_id: stripeSub.id,
@@ -1609,7 +2529,7 @@ export class SubscriptionService {
                 current_period_start: new Date().toISOString(),
                 updated_at: new Date().toISOString(),
             })
-            .eq('user_id', userId);
+            .eq('company_id', subscriptionCompanyId);
 
         // Stripe's flexible billing flow may expose the client secret on either
         // latest_invoice.confirmation_secret or latest_invoice.payment_intent.
@@ -1701,6 +2621,16 @@ export class SubscriptionService {
                         pendingSession as RegistrationPaymentSessionRecord,
                     );
                 }
+
+                const pendingCompanySession =
+                    await this.getPendingCompanySessionByStripeSubscriptionId(
+                        subscriptionId,
+                    );
+                if (pendingCompanySession) {
+                    await this.finalizePendingCompanySessionRecord(
+                        pendingCompanySession,
+                    );
+                }
                 break;
             }
 
@@ -1783,6 +2713,18 @@ export class SubscriptionService {
                         );
                     }
                 }
+
+                if (['active', 'trialing'].includes(sub.status)) {
+                    const pendingCompanySession =
+                        await this.getPendingCompanySessionByStripeSubscriptionId(
+                            sub.id,
+                        );
+                    if (pendingCompanySession) {
+                        await this.finalizePendingCompanySessionRecord(
+                            pendingCompanySession,
+                        );
+                    }
+                }
                 break;
             }
 
@@ -1809,6 +2751,14 @@ export class SubscriptionService {
                     })
                     .eq('stripe_subscription_id', subscriptionId)
                     .is('finalized_user_id', null);
+
+                await supabase
+                    .from('pending_company_payment_sessions')
+                    .update({
+                        status: 'past_due',
+                    })
+                    .eq('stripe_subscription_id', subscriptionId)
+                    .is('finalized_company_id', null);
                 break;
             }
 
@@ -1837,6 +2787,14 @@ export class SubscriptionService {
                     })
                     .eq('stripe_subscription_id', sub.id)
                     .is('finalized_user_id', null);
+
+                await supabase
+                    .from('pending_company_payment_sessions')
+                    .update({
+                        status: 'cancelled',
+                    })
+                    .eq('stripe_subscription_id', sub.id)
+                    .is('finalized_company_id', null);
                 break;
             }
         }
@@ -1845,11 +2803,19 @@ export class SubscriptionService {
     /**
      * Creates a Stripe Billing Portal session for managing payment methods.
      */
-    async createBillingPortalSession(userId: string): Promise<{ url: string }> {
-        const effectiveTarget = await resolveEffectiveSubscriptionTarget(userId);
+    async createBillingPortalSession(
+        userId: string,
+        explicitCompanyId?: string | null,
+    ): Promise<{ url: string }> {
+        const effectiveTarget = await resolveEffectiveSubscriptionTarget(userId, explicitCompanyId);
         if (!effectiveTarget.can_manage_billing) {
             throw new ForbiddenException(
                 'La facturation est gérée par le propriétaire de l\'entreprise.',
+            );
+        }
+        if (!effectiveTarget.subscription_company_id) {
+            throw new BadRequestException(
+                'Impossible de déterminer l’entreprise à facturer.',
             );
         }
 
@@ -1860,7 +2826,7 @@ export class SubscriptionService {
         const { data: subscription } = await supabase
             .from('subscriptions')
             .select('stripe_customer_id')
-            .eq('user_id', userId)
+            .eq('company_id', effectiveTarget.subscription_company_id)
             .maybeSingle();
 
         if (!subscription?.stripe_customer_id) {
@@ -1886,26 +2852,21 @@ export class SubscriptionService {
         const stripe = this.ensureStripe();
         const supabase = getSupabaseAdmin();
 
-        // Find the company owner
-        const { data: company } = await supabase
-            .from('companies')
-            .select('owner_id')
-            .eq('id', companyId)
-            .single();
-
-        if (!company?.owner_id) return;
-
-        // Get owner's subscription
+        // Get company subscription
         const { data: subscription } = await supabase
             .from('subscriptions')
             .select('stripe_subscription_id, stripe_member_item_id, plan_id, extra_members_quantity')
-            .eq('user_id', company.owner_id)
+            .eq('company_id', companyId)
             .maybeSingle();
 
         if (!subscription?.stripe_subscription_id) return;
 
         // Count extra members
-        const extraMembers = await this.countExtraMembers(supabase, company.owner_id);
+        const extraMembers = await this.countExtraMembers(
+            supabase,
+            companyId,
+            'merchant_admin',
+        );
         const defaultPaymentMethodType = await this.getDefaultSubscriptionPaymentMethodType(
             stripe,
             subscription.stripe_subscription_id,
@@ -1972,7 +2933,7 @@ export class SubscriptionService {
                 extra_members_quantity: extraMembers,
                 updated_at: new Date().toISOString(),
             })
-            .eq('user_id', company.owner_id);
+            .eq('company_id', companyId);
     }
 
     /**
@@ -1982,14 +2943,22 @@ export class SubscriptionService {
         userId: string,
         planSlug: string,
         billingPeriod?: 'monthly' | 'yearly',
+        explicitCompanyId?: string | null,
     ): Promise<SubscriptionDto> {
         await this.legalDocumentService.ensurePlatformAcceptanceCurrent(userId);
         const supabase = getSupabaseAdmin();
-        const effectiveTarget = await resolveEffectiveSubscriptionTarget(userId);
+        const effectiveTarget = await resolveEffectiveSubscriptionTarget(userId, explicitCompanyId);
+        const subscriptionCompanyId = effectiveTarget.subscription_company_id;
+        const ownerUserId = effectiveTarget.owner_user_id || userId;
 
         if (!effectiveTarget.can_manage_billing) {
             throw new ForbiddenException(
                 'La facturation est gérée par le propriétaire de l\'entreprise.',
+            );
+        }
+        if (!subscriptionCompanyId) {
+            throw new BadRequestException(
+                'Impossible de déterminer l’entreprise à facturer pour ce changement de plan.',
             );
         }
 
@@ -2007,7 +2976,7 @@ export class SubscriptionService {
         const { data: existingSubscription } = await supabase
             .from('subscriptions')
             .select('*')
-            .eq('user_id', userId)
+            .eq('company_id', subscriptionCompanyId)
             .maybeSingle();
 
         // Use existing billing_period if not provided
@@ -2021,17 +2990,19 @@ export class SubscriptionService {
                 await supabase
                     .from('subscriptions')
                     .update({
+                        user_id: ownerUserId,
                         plan_id: newPlan.id,
                         status: 'active',
                         billing_period: effectiveBillingPeriod,
                         updated_at: new Date().toISOString(),
                     })
-                    .eq('user_id', userId);
+                    .eq('company_id', subscriptionCompanyId);
             } else {
                 await supabase
                     .from('subscriptions')
                     .insert({
-                        user_id: userId,
+                        user_id: ownerUserId,
+                        company_id: subscriptionCompanyId,
                         plan_id: newPlan.id,
                         status: 'active',
                         billing_period: effectiveBillingPeriod,
@@ -2089,7 +3060,8 @@ export class SubscriptionService {
             }],
             proration_behavior: 'create_prorations',
             metadata: {
-                user_id: userId,
+                user_id: ownerUserId,
+                company_id: subscriptionCompanyId,
                 plan_id: newPlan.id,
                 billing_period: effectiveBillingPeriod,
             },
@@ -2099,11 +3071,12 @@ export class SubscriptionService {
         await supabase
             .from('subscriptions')
             .update({
+                user_id: ownerUserId,
                 plan_id: newPlan.id,
                 billing_period: effectiveBillingPeriod,
                 updated_at: new Date().toISOString(),
             })
-            .eq('user_id', userId);
+            .eq('company_id', subscriptionCompanyId);
 
         return {
             ...existingSubscription,

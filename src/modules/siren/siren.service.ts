@@ -8,26 +8,27 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { stripNonDigits, detectQueryType } from '../../shared/utils/business-identifiers.util';
 import { GouvRechercheEntreprisesProvider, type GouvUpstreamSearchResponse } from './gouv-recherche-entreprises.provider';
-import { InseeSireneProvider } from './insee-sirene.provider';
+import { InseeSireneProvider, type InseeTextSearchDiagnostics } from './insee-sirene.provider';
+import { normalizeInseeSearchInput, simplifyBusinessNameForRaisonSociale } from './insee-sirene.mapper';
 import { SirenRateLimitError } from './siren.types';
-import type { SirenSearchResult } from './siren.types';
+import type { SirenLookupPage, SirenSearchResult } from './siren.types';
 
-export { SirenRateLimitError, type SirenSearchResult } from './siren.types';
+export { SirenRateLimitError, type SirenLookupPage, type SirenSearchResult } from './siren.types';
 
 const RESULTS_CACHE_TTL_MS = 60 * 60 * 1000;
 const EMPTY_RESULTS_CACHE_TTL_MS = 10 * 60 * 1000;
 
-interface CachedLookupEntry {
+interface CachedLookupEntry<T> {
     expiresAt: number;
-    data: SirenSearchResult[];
+    data: T;
 }
 
 @Injectable()
 export class SirenService implements OnModuleInit {
     private readonly logger = new Logger(SirenService.name);
     private readonly USER_AGENT = `SenedBackend/1.0 (${process.env.NODE_ENV ?? 'development'})`;
-    private readonly queryCache = new Map<string, CachedLookupEntry>();
-    private readonly inFlightQueries = new Map<string, Promise<SirenSearchResult[]>>();
+    private readonly queryCache = new Map<string, CachedLookupEntry<unknown>>();
+    private readonly inFlightQueries = new Map<string, Promise<unknown>>();
     private cooldownUntil = 0;
 
     private gouvProvider: GouvRechercheEntreprisesProvider | null = null;
@@ -90,11 +91,81 @@ export class SirenService implements OnModuleInit {
         return this.inseeProvider;
     }
 
-    private getCacheKey(query: string, limit: number): string {
-        return `${query.trim().toLowerCase()}::${limit}`;
+    private getProviderCachePrefix(): string {
+        return this.isInseeProvider() ? 'insee' : 'gouv';
     }
 
-    private getCachedResults(cacheKey: string): SirenSearchResult[] | null {
+    private isInseeDiagnosticsEnabled(): boolean {
+        const value = this.configService.get<string>('SIREN_INSEE_DIAGNOSTICS_ENABLED')?.trim().toLowerCase();
+        return value === '1' || value === 'true' || value === 'yes' || value === 'on';
+    }
+
+    private isInseeLightResultsEnabled(): boolean {
+        const value = this.configService.get<string>('SIREN_INSEE_LIGHT_RESULTS')?.trim().toLowerCase();
+        if (!value) {
+            return true;
+        }
+        return !(value === '0' || value === 'false' || value === 'no' || value === 'off');
+    }
+
+    private logInseeTextDiagnostics(
+        diagnostics: InseeTextSearchDiagnostics,
+        retryAfterSeconds?: number,
+    ): void {
+        if (!this.isInseeDiagnosticsEnabled()) {
+            return;
+        }
+
+        const payload: Record<string, unknown> = {
+            queryRaw: diagnostics.queryRaw,
+            queryNormalized: diagnostics.queryNormalized,
+            queryPrimaryName: diagnostics.queryPrimaryName,
+            strategy: diagnostics.strategy,
+            limitRequested: diagnostics.limitRequested,
+            limitEffective: diagnostics.limitEffective,
+            total: diagnostics.total,
+            displayedCount: diagnostics.displayedCount,
+            hasNextCursor: diagnostics.hasNextCursor,
+            nextCursorPresent: diagnostics.nextCursorPresent,
+            fallbackTriggered: diagnostics.fallbackTriggered,
+        };
+
+        if (typeof retryAfterSeconds === 'number' && retryAfterSeconds > 0) {
+            payload.retryAfterSeconds = retryAfterSeconds;
+        }
+
+        this.logger.log(`[SIREN/insee] text-search ${JSON.stringify(payload)}`);
+    }
+
+    private buildDefaultInseeDiagnostics(
+        query: string,
+        limit: number,
+    ): InseeTextSearchDiagnostics {
+        const queryNormalized = normalizeInseeSearchInput(query);
+        const queryPrimaryName = simplifyBusinessNameForRaisonSociale(query);
+        const limitEffective = Math.min(limit, 10);
+
+        return {
+            queryRaw: query,
+            queryNormalized,
+            queryPrimaryName,
+            strategy: 'raisonSociale',
+            limitRequested: limit,
+            limitEffective,
+            total: 0,
+            displayedCount: 0,
+            hasNextCursor: false,
+            nextCursorPresent: false,
+            fallbackTriggered: false,
+        };
+    }
+
+    private getCacheKey(query: string, limit: number, cursor?: string | null): string {
+        const normalizedCursor = cursor?.trim() || '';
+        return `${this.getProviderCachePrefix()}::${query.trim().toLowerCase()}::${limit}::${normalizedCursor}`;
+    }
+
+    private getCachedResults<T>(cacheKey: string): T | null {
         const cached = this.queryCache.get(cacheKey);
         if (!cached) {
             return null;
@@ -105,14 +176,46 @@ export class SirenService implements OnModuleInit {
             return null;
         }
 
-        return cached.data;
+        return cached.data as T;
     }
 
-    private setCachedResults(cacheKey: string, data: SirenSearchResult[]): void {
+    private setCachedResults<T>(cacheKey: string, data: T): void {
+        const unknownData = data as unknown;
+        const pagedItems =
+            unknownData && typeof unknownData === 'object' && 'items' in unknownData
+                ? (unknownData as { items?: unknown[] }).items
+                : undefined;
+        const itemCount = Array.isArray(unknownData)
+            ? unknownData.length
+            : Array.isArray(pagedItems)
+                ? pagedItems.length
+                : 0;
+
         this.queryCache.set(cacheKey, {
             data,
-            expiresAt: Date.now() + (data.length > 0 ? RESULTS_CACHE_TTL_MS : EMPTY_RESULTS_CACHE_TTL_MS),
+            expiresAt: Date.now() + (itemCount > 0 ? RESULTS_CACHE_TTL_MS : EMPTY_RESULTS_CACHE_TTL_MS),
         });
+    }
+
+    private buildLookupPage(
+        items: SirenSearchResult[],
+        limit: number,
+        options?: {
+            total?: number;
+            nextCursor?: string | null;
+            hasMore?: boolean;
+        },
+    ): SirenLookupPage {
+        const nextCursor = options?.nextCursor ?? null;
+        const hasMore = options?.hasMore ?? !!nextCursor;
+
+        return {
+            items,
+            total: options?.total ?? items.length,
+            limit,
+            nextCursor: hasMore ? nextCursor : null,
+            hasMore,
+        };
     }
 
     private getRemainingCooldownSeconds(): number {
@@ -157,18 +260,78 @@ export class SirenService implements OnModuleInit {
         limit: number,
         cacheKey: string,
     ): Promise<SirenSearchResult[]> {
+        const pagedResults = await this.executeTextSearchPagedInsee(query, limit, null, cacheKey);
+        return pagedResults.items;
+    }
+
+    private async executeTextSearchPagedGouv(
+        query: string,
+        limit: number,
+        cursor: string | null | undefined,
+        cacheKey: string,
+    ): Promise<SirenLookupPage> {
+        const gouv = this.getGouv();
         const retryAfterSeconds = this.getRemainingCooldownSeconds();
         if (retryAfterSeconds > 0) {
             throw new SirenRateLimitError(retryAfterSeconds);
         }
 
-        const results = await this.getInsee().searchByText(query, limit);
-        this.setCachedResults(cacheKey, results);
-        return results;
+        const page = Math.max(1, Number.parseInt(cursor ?? '1', 10) || 1);
+        const upstream: GouvUpstreamSearchResponse = await gouv.fetchSearch(query.trim(), limit, page);
+        if ([400, 404].includes(upstream.status)) {
+            console.warn(
+                `[SIREN/gouv] upstream lookup returned ${upstream.status} for query "${query.trim()}"`,
+            );
+            const emptyPage = this.buildLookupPage([], limit);
+            this.setCachedResults(cacheKey, emptyPage);
+            return emptyPage;
+        }
+
+        if (upstream.status >= 400 || !upstream.data?.results) {
+            throw new BadRequestException('Erreur lors de la recherche');
+        }
+
+        const items = upstream.data.results.map((entreprise) => gouv.mapEntreprise(entreprise));
+        const total = upstream.data.total_results ?? items.length;
+        const hasMore = page * limit < total;
+        const pagedResults = this.buildLookupPage(items, limit, {
+            total,
+            nextCursor: hasMore ? String(page + 1) : null,
+            hasMore,
+        });
+        this.setCachedResults(cacheKey, pagedResults);
+        return pagedResults;
+    }
+
+    private async executeTextSearchPagedInsee(
+        query: string,
+        limit: number,
+        cursor: string | null | undefined,
+        cacheKey: string,
+    ): Promise<SirenLookupPage> {
+        const retryAfterSeconds = this.getRemainingCooldownSeconds();
+        if (retryAfterSeconds > 0) {
+            this.logInseeTextDiagnostics(this.buildDefaultInseeDiagnostics(query, limit), retryAfterSeconds);
+            throw new SirenRateLimitError(retryAfterSeconds);
+        }
+
+        try {
+            const response = await this.getInsee().searchByTextWithDiagnostics(query, limit, cursor, {
+                lightResults: this.isInseeLightResultsEnabled(),
+            });
+            this.logInseeTextDiagnostics(response.diagnostics);
+            this.setCachedResults(cacheKey, response.page);
+            return response.page;
+        } catch (error) {
+            if (error instanceof SirenRateLimitError) {
+                this.logInseeTextDiagnostics(this.buildDefaultInseeDiagnostics(query, limit), error.retryAfterSeconds);
+            }
+            throw error;
+        }
     }
 
     private async executeTextSearch(query: string, limit: number, cacheKey: string): Promise<SirenSearchResult[]> {
-        const cached = this.getCachedResults(cacheKey);
+        const cached = this.getCachedResults<SirenSearchResult[]>(cacheKey);
         if (cached) {
             return cached;
         }
@@ -177,6 +340,23 @@ export class SirenService implements OnModuleInit {
             return this.executeTextSearchInsee(query, limit, cacheKey);
         }
         return this.executeTextSearchGouv(query, limit, cacheKey);
+    }
+
+    private async executeTextSearchPaged(
+        query: string,
+        limit: number,
+        cursor: string | null | undefined,
+        cacheKey: string,
+    ): Promise<SirenLookupPage> {
+        const cached = this.getCachedResults<SirenLookupPage>(cacheKey);
+        if (cached) {
+            return cached;
+        }
+
+        if (this.isInseeProvider()) {
+            return this.executeTextSearchPagedInsee(query, limit, cursor, cacheKey);
+        }
+        return this.executeTextSearchPagedGouv(query, limit, cursor, cacheKey);
     }
 
     /**
@@ -194,7 +374,7 @@ export class SirenService implements OnModuleInit {
         try {
             const siren = cleanedNumber.substring(0, 9);
             const cacheKey = this.getCacheKey(`exact:${cleanedNumber}`, 1);
-            const cached = this.getCachedResults(cacheKey);
+            const cached = this.getCachedResults<SirenSearchResult[]>(cacheKey);
             if (cached?.[0]) {
                 return cached[0];
             }
@@ -250,17 +430,29 @@ export class SirenService implements OnModuleInit {
      * Recherche des entreprises par texte (nom, SIREN, etc.)
      */
     async searchByText(query: string, limit: number = 10): Promise<SirenSearchResult[]> {
+        const pagedResults = await this.searchByTextPaged(query, limit);
+        return pagedResults.items;
+    }
+
+    /**
+     * Recherche des entreprises par texte avec pagination.
+     */
+    async searchByTextPaged(
+        query: string,
+        limit: number = 25,
+        cursor?: string | null,
+    ): Promise<SirenLookupPage> {
         if (!query || query.trim().length < 3) {
-            return [];
+            return this.buildLookupPage([], limit);
         }
 
-        const cacheKey = this.getCacheKey(query, limit);
+        const cacheKey = this.getCacheKey(query, limit, cursor);
         const existingRequest = this.inFlightQueries.get(cacheKey);
         if (existingRequest) {
-            return existingRequest;
+            return existingRequest as Promise<SirenLookupPage>;
         }
 
-        const request = this.executeTextSearch(query, limit, cacheKey)
+        const request = this.executeTextSearchPaged(query, limit, cursor, cacheKey)
             .catch((error) => {
                 if (error instanceof SirenRateLimitError || error instanceof BadRequestException) {
                     throw error;
@@ -282,8 +474,20 @@ export class SirenService implements OnModuleInit {
      * (SIREN exact, SIRET exact, ou recherche textuelle).
      */
     async lookup(query: string, limit: number = 10): Promise<SirenSearchResult[]> {
+        const pagedResults = await this.lookupPaged(query, limit);
+        return pagedResults.items;
+    }
+
+    /**
+     * Recherche unifiée paginée : détecte automatiquement le type de requête.
+     */
+    async lookupPaged(
+        query: string,
+        limit: number = 25,
+        cursor?: string | null,
+    ): Promise<SirenLookupPage> {
         if (!query || query.trim().length === 0) {
-            return [];
+            return this.buildLookupPage([], limit);
         }
 
         const trimmed = query.trim();
@@ -292,19 +496,23 @@ export class SirenService implements OnModuleInit {
         if (queryType === 'siren' || queryType === 'siret') {
             try {
                 const result = await this.search(trimmed);
-                return [result];
+                return this.buildLookupPage([result], limit, {
+                    total: 1,
+                    nextCursor: null,
+                    hasMore: false,
+                });
             } catch (error) {
                 if (error instanceof NotFoundException) {
-                    return [];
+                    return this.buildLookupPage([], limit);
                 }
                 throw error;
             }
         }
 
         if (trimmed.length < 3) {
-            return [];
+            return this.buildLookupPage([], limit);
         }
 
-        return this.searchByText(trimmed, limit);
+        return this.searchByTextPaged(trimmed, limit, cursor);
     }
 }

@@ -1438,35 +1438,14 @@ export class CompanyService {
     userId: string,
     ownerRole: OwnerCompanyRole,
   ): Promise<void> {
-    const supabase = getSupabaseAdmin();
-
-    // Récupère l'abonnement de l'utilisateur
-    const { data: subscription } = await supabase
-      .from("subscriptions")
-      .select(
-        `
-                plan:subscription_plans(max_companies)
-            `,
-      )
-      .eq("user_id", userId)
-      .single();
-
-    const maxCompanies = (subscription as any)?.plan?.max_companies;
-
-    if (maxCompanies == null) {
+    // Billing is now company-centric: merchant owners can always create
+    // a new company, then subscribe specifically for that company.
+    if (ownerRole === "merchant_admin") {
       return;
     }
 
-    const count = await this.getOwnedCompaniesCount(userId, ownerRole, {
-      excludeMerchantCompaniesLinkedToAccountantCabinet:
-        ownerRole === "merchant_admin",
-    });
-
-    if (count >= maxCompanies) {
-      throw new ForbiddenException(
-        `Vous avez atteint la limite de ${maxCompanies} entreprise(s) pour votre abonnement. Passez à un plan supérieur pour ajouter plus d'entreprises.`,
-      );
-    }
+    // Accountant behavior remains unchanged.
+    void userId;
   }
 
   /**

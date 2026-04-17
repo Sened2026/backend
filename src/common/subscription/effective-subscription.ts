@@ -40,10 +40,12 @@ export interface EffectiveSubscriptionTarget {
     scope: EffectiveSubscriptionScope;
     company_id: string | null;
     owner_user_id: string | null;
-    subscription_user_id: string | null;
+    subscription_company_id: string | null;
     company_owner_role: SubscriptionOwnerCompanyRole | null;
     /** Société marchande liée à un cabinet (facturation gérée comme l'espace comptable, plan free autorisé). */
     is_selected_company_linked_to_accountant_cabinet: boolean;
+    /** Vrai si l'utilisateur courant est administrateur marchand invité (non propriétaire) de la société sélectionnée. */
+    is_invited_merchant_admin: boolean;
     can_manage_billing: boolean;
     has_any_active_company_subscription: boolean;
     has_company_access: boolean;
@@ -167,27 +169,23 @@ export async function resolveEffectiveSubscriptionTarget(
         is_company_linked_to_accountant_cabinet: Boolean(m.accountant_company_id),
     }));
 
-    const ownerIds = [...new Set(
-        memberships
-            .map((membership: UserMembershipContext) => membership.owner_user_id)
-            .filter((ownerUserId: string | null): ownerUserId is string => Boolean(ownerUserId)),
-    )];
-
     const companyIds = [...new Set(
         memberships.map((membership: UserMembershipContext) => membership.company_id),
     )];
 
     const ownerRoleByCompanyId = new Map<string, SubscriptionOwnerCompanyRole>();
-    if (ownerIds.length > 0 && companyIds.length > 0) {
+    if (companyIds.length > 0) {
         const { data: ownerRelations } = await supabase
             .from('user_companies')
             .select('company_id, user_id, role')
             .in('company_id', companyIds)
-            .in('user_id', ownerIds);
+            .in('role', ['merchant_admin', 'accountant']);
 
         for (const relation of ownerRelations || []) {
-            const membership = memberships.find((item) =>
-                item.company_id === relation.company_id && item.owner_user_id === relation.user_id,
+            const membership = memberships.find(
+                (item) =>
+                    item.company_id === relation.company_id
+                    && item.owner_user_id === relation.user_id,
             );
             if (membership && !ownerRoleByCompanyId.has(relation.company_id)) {
                 ownerRoleByCompanyId.set(relation.company_id, relation.role as SubscriptionOwnerCompanyRole);
@@ -196,20 +194,22 @@ export async function resolveEffectiveSubscriptionTarget(
     }
 
     let hasAnyActiveCompanySubscription = false;
-    if (ownerIds.length > 0) {
-        const { data: ownerSubscriptions } = await supabase
+    if (companyIds.length > 0) {
+        const { data: companySubscriptions } = await supabase
             .from('subscriptions')
-            .select('user_id, status, plan_id, subscription_plans(slug)')
-            .in('user_id', ownerIds);
+            .select('company_id, status, plan_id, subscription_plans(slug)')
+            .in('company_id', companyIds);
 
-        const ownerSubscriptionByUserId = new Map<string, any>();
-        for (const subscription of ownerSubscriptions || []) {
-            ownerSubscriptionByUserId.set(subscription.user_id, subscription);
+        const subscriptionByCompanyId = new Map<string, any>();
+        for (const subscription of companySubscriptions || []) {
+            if (subscription.company_id) {
+                subscriptionByCompanyId.set(subscription.company_id, subscription);
+            }
         }
 
         hasAnyActiveCompanySubscription = memberships.some((membership: UserMembershipContext) =>
             hasUsableSubscriptionForCompanyOwnerRole(
-                ownerSubscriptionByUserId.get(membership.owner_user_id || ''),
+                subscriptionByCompanyId.get(membership.company_id),
                 ownerRoleByCompanyId.get(membership.company_id) || null,
                 {
                     isCompanyLinkedToAccountantCabinet: membership.is_company_linked_to_accountant_cabinet,
@@ -227,9 +227,10 @@ export async function resolveEffectiveSubscriptionTarget(
             scope: 'none',
             company_id: normalizedCompanyId,
             owner_user_id: null,
-            subscription_user_id: null,
+            subscription_company_id: null,
             company_owner_role: null,
             is_selected_company_linked_to_accountant_cabinet: false,
+            is_invited_merchant_admin: false,
             can_manage_billing: false,
             has_any_active_company_subscription: hasAnyActiveCompanySubscription,
             has_company_access: false,
@@ -249,9 +250,10 @@ export async function resolveEffectiveSubscriptionTarget(
             scope: 'self',
             company_id: ownedMembership.company_id,
             owner_user_id: userId,
-            subscription_user_id: userId,
+            subscription_company_id: ownedMembership.company_id,
             company_owner_role: ownerRoleByCompanyId.get(ownedMembership.company_id) || (ownedMembership.role as SubscriptionOwnerCompanyRole),
             is_selected_company_linked_to_accountant_cabinet: ownedMembership.is_company_linked_to_accountant_cabinet,
+            is_invited_merchant_admin: false,
             can_manage_billing: canMembershipManageBilling(ownedMembership),
             has_any_active_company_subscription: hasAnyActiveCompanySubscription,
             has_company_access: true,
@@ -260,13 +262,20 @@ export async function resolveEffectiveSubscriptionTarget(
     }
 
     if (selectedMembership?.owner_user_id) {
+        const selectedOwnerRole = ownerRoleByCompanyId.get(selectedMembership.company_id) || null;
+        const isInvitedMerchantAdmin =
+            selectedMembership.role === 'merchant_admin'
+            && !selectedMembership.is_owner
+            && selectedOwnerRole === 'merchant_admin';
+
         return {
             scope: 'owner',
             company_id: selectedMembership.company_id,
             owner_user_id: selectedMembership.owner_user_id,
-            subscription_user_id: selectedMembership.owner_user_id,
-            company_owner_role: ownerRoleByCompanyId.get(selectedMembership.company_id) || null,
+            subscription_company_id: selectedMembership.company_id,
+            company_owner_role: selectedOwnerRole,
             is_selected_company_linked_to_accountant_cabinet: selectedMembership.is_company_linked_to_accountant_cabinet,
+            is_invited_merchant_admin: isInvitedMerchantAdmin,
             can_manage_billing: false,
             has_any_active_company_subscription: hasAnyActiveCompanySubscription,
             has_company_access: true,
@@ -278,9 +287,10 @@ export async function resolveEffectiveSubscriptionTarget(
         scope: memberships.length > 0 ? 'none' : 'self',
         company_id: selectedMembership?.company_id || null,
         owner_user_id: memberships.length > 0 ? null : userId,
-        subscription_user_id: memberships.length > 0 ? null : userId,
+        subscription_company_id: null,
         company_owner_role: null,
         is_selected_company_linked_to_accountant_cabinet: selectedMembership?.is_company_linked_to_accountant_cabinet ?? false,
+        is_invited_merchant_admin: false,
         can_manage_billing: memberships.length === 0,
         has_any_active_company_subscription: hasAnyActiveCompanySubscription,
         has_company_access: true,

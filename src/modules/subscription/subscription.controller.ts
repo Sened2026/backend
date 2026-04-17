@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Body, UseGuards, Req, Headers, RawBodyRequest, BadRequestException } from '@nestjs/common';
+import { Controller, Get, Post, Body, UseGuards, Req, Headers, RawBodyRequest, BadRequestException, Param } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Stripe from 'stripe';
 import { SubscriptionService } from './subscription.service';
@@ -11,10 +11,19 @@ import {
     ChangeSubscriptionDto,
     CreateSubscriptionDto,
     CreateRegistrationSubscriptionDto,
+    CreatePendingCompanySubscriptionDto,
+    FinalizePendingCompanySubscriptionDto,
+    FinalizePendingCompanySubscriptionResponseDto,
     FinalizeRegistrationSubscriptionDto,
+    PendingCompanyPaymentSessionSummaryDto,
+    PendingCompanySubscriptionResponseDto,
+    ValidateSubscriptionPromotionCodeDto,
     ValidateRegistrationPromotionCodeDto,
+    ValidatePendingCompanyPromotionCodeDto,
+    ValidatePendingCompanyPromotionCodeResponseDto,
 } from './dto/subscription.dto';
 import { Request } from 'express';
+import { getRequestCompanyId } from '../../common/subscription/effective-subscription';
 
 @Controller('subscription')
 @SkipSubscriptionCheck()
@@ -48,10 +57,16 @@ export class SubscriptionController {
     @UseGuards(SupabaseAuthGuard)
     async changePlan(
         @CurrentUser() user: SupabaseUser,
+        @Req() req: Request,
         @Body() dto: ChangeSubscriptionDto,
     ) {
         await this.legalDocumentService.syncPlatformAcceptanceFromMetadata(user);
-        return this.subscriptionService.changePlan(user.id, dto.plan_slug, dto.billing_period);
+        return this.subscriptionService.changePlan(
+            user.id,
+            dto.plan_slug,
+            dto.billing_period,
+            getRequestCompanyId(req),
+        );
     }
 
     /**
@@ -62,6 +77,7 @@ export class SubscriptionController {
     @UseGuards(SupabaseAuthGuard)
     async subscribe(
         @CurrentUser() user: SupabaseUser,
+        @Req() req: Request,
         @Body() dto: CreateSubscriptionDto,
     ) {
         await this.legalDocumentService.syncPlatformAcceptanceFromMetadata(user);
@@ -69,6 +85,75 @@ export class SubscriptionController {
             user.id,
             dto.plan_slug,
             dto.billing_period,
+            dto.promotion_code,
+            getRequestCompanyId(req),
+        );
+    }
+
+    @Post('promo/validate')
+    @UseGuards(SupabaseAuthGuard)
+    async validateSubscriptionPromotionCode(
+        @CurrentUser() user: SupabaseUser,
+        @Req() req: Request,
+        @Body() dto: ValidateSubscriptionPromotionCodeDto,
+    ) {
+        await this.legalDocumentService.syncPlatformAcceptanceFromMetadata(user);
+        return this.subscriptionService.validateSubscriptionPromotionCode(
+            user.id,
+            dto,
+            getRequestCompanyId(req),
+        );
+    }
+
+    @Post('company-creation')
+    @UseGuards(SupabaseAuthGuard)
+    async createPendingCompanySubscription(
+        @CurrentUser() user: SupabaseUser,
+        @Body() dto: CreatePendingCompanySubscriptionDto,
+    ): Promise<PendingCompanySubscriptionResponseDto> {
+        await this.legalDocumentService.syncPlatformAcceptanceFromMetadata(user);
+        return this.subscriptionService.createPendingCompanySubscription(
+            user.id,
+            dto,
+        );
+    }
+
+    @Get('company-creation/:id')
+    @UseGuards(SupabaseAuthGuard)
+    async getPendingCompanySession(
+        @CurrentUser() user: SupabaseUser,
+        @Param('id') id: string,
+    ): Promise<PendingCompanyPaymentSessionSummaryDto> {
+        await this.legalDocumentService.syncPlatformAcceptanceFromMetadata(user);
+        return this.subscriptionService.getPendingCompanyPaymentSessionSummary(
+            user.id,
+            id,
+        );
+    }
+
+    @Post('company-creation/promo/validate')
+    @UseGuards(SupabaseAuthGuard)
+    async validatePendingCompanyPromotionCode(
+        @CurrentUser() user: SupabaseUser,
+        @Body() dto: ValidatePendingCompanyPromotionCodeDto,
+    ): Promise<ValidatePendingCompanyPromotionCodeResponseDto> {
+        await this.legalDocumentService.syncPlatformAcceptanceFromMetadata(user);
+        return this.subscriptionService.validatePendingCompanyPromotionCode(
+            user.id,
+            dto,
+        );
+    }
+
+    @Post('company-creation/finalize')
+    @UseGuards(SupabaseAuthGuard)
+    async finalizePendingCompanySubscription(
+        @CurrentUser() user: SupabaseUser,
+        @Body() dto: FinalizePendingCompanySubscriptionDto,
+    ): Promise<FinalizePendingCompanySubscriptionResponseDto> {
+        await this.legalDocumentService.syncPlatformAcceptanceFromMetadata(user);
+        return this.subscriptionService.finalizePendingCompanySubscription(
+            user.id,
+            dto.session_id,
         );
     }
 
@@ -101,8 +186,11 @@ export class SubscriptionController {
      */
     @Post('billing-portal')
     @UseGuards(SupabaseAuthGuard)
-    async createBillingPortal(@CurrentUser() user: SupabaseUser) {
-        return this.subscriptionService.createBillingPortalSession(user.id);
+    async createBillingPortal(@CurrentUser() user: SupabaseUser, @Req() req: Request) {
+        return this.subscriptionService.createBillingPortalSession(
+            user.id,
+            getRequestCompanyId(req),
+        );
     }
 
     /**

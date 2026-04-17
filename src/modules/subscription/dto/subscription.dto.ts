@@ -7,7 +7,11 @@ import {
     IsNotEmpty,
     Matches,
     Length,
+    ValidateNested,
+    IsUUID,
 } from 'class-validator';
+import { Type } from 'class-transformer';
+import { CreateCompanyDto, CompanyWithRoleResponseDto } from '../../company/dto/company.dto';
 
 export enum SubscriptionPlanSlug {
     ESSENTIEL = 'essentiel',
@@ -51,6 +55,10 @@ export class CreateSubscriptionDto {
 
     @IsIn(['monthly', 'yearly'])
     billing_period: 'monthly' | 'yearly';
+
+    @IsOptional()
+    @IsString()
+    promotion_code?: string;
 }
 
 export class SubscribeResponseDto {
@@ -164,6 +172,114 @@ export class ValidateRegistrationPromotionCodeResponseDto {
     pricing: RegistrationPricingDto;
 }
 
+export class ValidateSubscriptionPromotionCodeDto {
+    @IsString()
+    plan_slug: string;
+
+    @IsIn(['monthly', 'yearly'])
+    billing_period: 'monthly' | 'yearly';
+
+    @IsString()
+    @IsNotEmpty()
+    promotion_code: string;
+}
+
+export class ValidateSubscriptionPromotionCodeResponseDto {
+    pricing: RegistrationPricingDto;
+}
+
+export class PendingCompanyDataDto extends CreateCompanyDto {
+    @IsOptional()
+    @IsIn(['merchant_admin'])
+    owner_role?: 'merchant_admin';
+}
+
+export class CompanyCreationSummaryDto {
+    name: string;
+    legal_name: string | null;
+    siren: string | null;
+    address: string | null;
+    postal_code: string | null;
+    city: string | null;
+    country: string | null;
+    email: string | null;
+    phone: string | null;
+    source_accountant_company_id: string | null;
+    accountant_company_name: string | null;
+}
+
+export class PendingCompanyPaymentSessionSummaryDto {
+    session_id: string;
+    status: string;
+    plan_slug: string | null;
+    billing_period: 'monthly' | 'yearly' | null;
+    company_summary: CompanyCreationSummaryDto;
+    finalized_company_id: string | null;
+    company: CompanyWithRoleResponseDto | null;
+}
+
+export class CreatePendingCompanySubscriptionDto {
+    @IsOptional()
+    @IsUUID('4')
+    session_id?: string;
+
+    @IsOptional()
+    @ValidateNested()
+    @Type(() => PendingCompanyDataDto)
+    company_data?: PendingCompanyDataDto;
+
+    @IsOptional()
+    @IsString()
+    plan_slug?: string;
+
+    @IsOptional()
+    @IsIn(['monthly', 'yearly'])
+    billing_period?: 'monthly' | 'yearly';
+
+    @IsOptional()
+    @IsString()
+    promotion_code?: string;
+}
+
+export class ValidatePendingCompanyPromotionCodeDto {
+    @IsUUID('4')
+    session_id: string;
+
+    @IsString()
+    plan_slug: string;
+
+    @IsIn(['monthly', 'yearly'])
+    billing_period: 'monthly' | 'yearly';
+
+    @IsString()
+    @IsNotEmpty()
+    promotion_code: string;
+}
+
+export class ValidatePendingCompanyPromotionCodeResponseDto {
+    pricing: RegistrationPricingDto;
+}
+
+export class PendingCompanySubscriptionResponseDto {
+    session_id: string;
+    subscription_id: string | null;
+    client_secret: string | null;
+    status: string;
+    pricing: RegistrationPricingDto | null;
+    company_summary: CompanyCreationSummaryDto;
+}
+
+export class FinalizePendingCompanySubscriptionDto {
+    @IsUUID('4')
+    session_id: string;
+}
+
+export class FinalizePendingCompanySubscriptionResponseDto {
+    status: 'completed' | 'processing';
+    message: string;
+    company: CompanyWithRoleResponseDto | null;
+}
+
 export class RegistrationSubscriptionResponseDto {
     registration_session_id: string;
     subscription_id: string;
@@ -188,6 +304,7 @@ export class FinalizeRegistrationSubscriptionResponseDto {
 export class SubscriptionDto {
     id: string;
     user_id: string;
+    company_id: string | null;
     plan_id: string | null;
     status: string;
     billing_period: string;
@@ -226,6 +343,7 @@ export class SubscriptionWithPlansDto {
     company_owner_role: 'merchant_admin' | 'accountant' | null;
     /** Entreprise marchande liée à un cabinet (plan free autorisé comme pour le cabinet). */
     is_company_linked_to_accountant_cabinet: boolean;
+    is_invited_merchant_admin: boolean;
     can_manage_billing: boolean;
     has_any_active_company_subscription: boolean;
     usage: {

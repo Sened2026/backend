@@ -149,10 +149,90 @@ export function mapInseeUniteLegaleAndEtablissement(
 /**
  * Requête multicritères INSEE (syntaxe type Lucene) pour recherche par libellé / nom.
  */
+const INSEE_TEXT_SEARCH_FIELDS = [
+    'denominationUniteLegale',
+    'nomUniteLegale',
+    'denominationUsuelle1UniteLegale',
+    'denominationUsuelle2UniteLegale',
+    'denominationUsuelle3UniteLegale',
+    'nomUsageUniteLegale',
+] as const;
+
+export function normalizeInseeSearchInput(raw: string): string {
+    return raw
+        .trim()
+        .replace(/[’`´]/g, "'")
+        .replace(/\s+/g, ' ');
+}
+
+export function simplifyBusinessNameForRaisonSociale(raw: string): string {
+    const normalized = normalizeInseeSearchInput(raw);
+    if (!normalized) {
+        return '';
+    }
+
+    const simplified = normalized
+        .replace(/\([^()]*\)/g, ' ')
+        .replace(/[^\p{L}\p{N}']+/gu, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    return simplified || normalized;
+}
+
+function normalizeInseeTokenInput(value: string): string {
+    return value
+        .replace(/[^\p{L}\p{N}]+/gu, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function escapeInseeSimpleValue(value: string): string {
+    return value.replace(/"/g, '\\"');
+}
+
+function escapeInseeLuceneValue(value: string): string {
+    return value.replace(/([+\-&|!(){}[\]^"~*?:\\/])/g, '\\$1');
+}
+
+function buildInseeFieldClause(field: string, tokenClause: string, phraseClauses: string[]): string {
+    const phrasePart = phraseClauses
+        .map((phrase) => `${field}:"${phrase}"`)
+        .join(' OR ');
+
+    if (!tokenClause) {
+        return `periode(${phrasePart})`;
+    }
+    return `periode(${field}:(${tokenClause}) OR ${phrasePart})`;
+}
+
+export function buildInseeRaisonSocialeQuery(raw: string): string {
+    const normalized = normalizeInseeSearchInput(raw);
+    if (!normalized) return '';
+    return `raisonSociale:${escapeInseeSimpleValue(normalized)}`;
+}
+
 export function buildInseeTextSearchQuery(raw: string): string {
-    const trimmed = raw.trim();
-    const escaped = trimmed.replace(/([+\-&|!(){}[\]^"~*?:\\/])/g, '\\$1');
-    return `periode(denominationUniteLegale:${escaped}*) OR periode(nomUniteLegale:${escaped}*)`;
+    const normalized = normalizeInseeSearchInput(raw);
+    if (!normalized) return '';
+
+    const tokenInput = normalizeInseeTokenInput(normalized);
+    const tokens = tokenInput
+        .split(' ')
+        .filter(Boolean)
+        .map((token) => token.trim())
+        .filter((token) => /[\p{L}\p{N}]/u.test(token))
+        .map((token) => `${escapeInseeLuceneValue(token)}*`);
+
+    const tokenClause = tokens.join(' AND ');
+    const phraseClauses = [escapeInseeLuceneValue(normalized)];
+    if (tokenInput && tokenInput !== normalized) {
+        phraseClauses.push(escapeInseeLuceneValue(tokenInput));
+    }
+
+    return INSEE_TEXT_SEARCH_FIELDS
+        .map((field) => buildInseeFieldClause(field, tokenClause, phraseClauses))
+        .join(' OR ');
 }
 
 export function mapInseeEtablissementToResult(etab: InseeEtablissement): SirenSearchResult {

@@ -133,6 +133,10 @@ describe('SubscriptionService.syncMemberQuantity', () => {
         ensurePlatformAcceptanceCurrent: jest.Mock;
         validateCurrentPlatformAcceptanceTimestamp: jest.Mock;
     };
+    let companyServiceMock: {
+        create: jest.Mock;
+        findOne: jest.Mock;
+    };
     let stripeMock: {
         paymentMethods: { retrieve: jest.Mock };
         subscriptionItems: {
@@ -154,6 +158,10 @@ describe('SubscriptionService.syncMemberQuantity', () => {
             ensurePlatformAcceptanceCurrent: jest.fn(),
             validateCurrentPlatformAcceptanceTimestamp: jest.fn(),
         };
+        companyServiceMock = {
+            create: jest.fn(),
+            findOne: jest.fn(),
+        };
 
         service = new SubscriptionService(
             {
@@ -166,6 +174,7 @@ describe('SubscriptionService.syncMemberQuantity', () => {
                 }),
             } as any,
             legalDocumentServiceMock as any,
+            companyServiceMock as any,
         );
 
         stripeMock = {

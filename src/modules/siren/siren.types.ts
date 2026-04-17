@@ -25,3 +25,11 @@ export interface SirenSearchResult {
     naf_code: string;
     creation_date: string;
 }
+
+export interface SirenLookupPage {
+    items: SirenSearchResult[];
+    total: number;
+    limit: number;
+    nextCursor: string | null;
+    hasMore: boolean;
+}

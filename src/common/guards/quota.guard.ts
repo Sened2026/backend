@@ -16,18 +16,6 @@ import {
 export class QuotaGuard implements CanActivate {
     constructor(private reflector: Reflector) {}
 
-    private async getOwnedMerchantCompanyIds(supabase: any, ownerUserId: string): Promise<string[]> {
-        const { data: ownerRelations } = await supabase
-            .from('user_companies')
-            .select('company_id, company:companies(owner_id)')
-            .eq('user_id', ownerUserId)
-            .eq('role', 'merchant_admin');
-
-        return (ownerRelations || [])
-            .filter((relation: any) => relation.company?.owner_id === ownerUserId)
-            .map((relation: any) => relation.company_id);
-    }
-
     async canActivate(context: ExecutionContext): Promise<boolean> {
         const quotaType = this.reflector.get<string>(
             CHECK_QUOTA_KEY,
@@ -45,16 +33,22 @@ export class QuotaGuard implements CanActivate {
             return true;
         }
 
-        const subscriptionUserId = effectiveTarget.subscription_user_id || userId;
-        const ownerUserId = effectiveTarget.owner_user_id || subscriptionUserId;
+        if (effectiveTarget.is_invited_merchant_admin) {
+            return true;
+        }
+
+        const subscriptionCompanyId = effectiveTarget.subscription_company_id;
+        if (!subscriptionCompanyId) {
+            return true;
+        }
 
         const supabase = getSupabaseAdmin();
 
-        // Get user subscription with plan limits
+        // Get company subscription with plan limits
         const { data: subscription } = await supabase
             .from('subscriptions')
             .select('plan_id, subscription_plans(*)')
-            .eq('user_id', subscriptionUserId)
+            .eq('company_id', subscriptionCompanyId)
             .maybeSingle();
 
         // No subscription → no quota enforcement
@@ -66,18 +60,15 @@ export class QuotaGuard implements CanActivate {
             const limit = plan.max_quotes_per_month;
             if (!limit) return true; // null = unlimited
 
-            // Count quotes created this month across all user's companies
+            // Count quotes created this month for the selected company
             const startOfMonth = new Date();
             startOfMonth.setDate(1);
             startOfMonth.setHours(0, 0, 0, 0);
 
-            const companyIds = await this.getOwnedMerchantCompanyIds(supabase, ownerUserId);
-            if (companyIds.length === 0) return true;
-
             const { count } = await supabase
                 .from('quotes')
                 .select('*', { count: 'exact', head: true })
-                .in('company_id', companyIds)
+                .eq('company_id', subscriptionCompanyId)
                 .gte('created_at', startOfMonth.toISOString());
 
             if ((count || 0) >= limit) {
@@ -95,13 +86,10 @@ export class QuotaGuard implements CanActivate {
             startOfMonth.setDate(1);
             startOfMonth.setHours(0, 0, 0, 0);
 
-            const companyIds = await this.getOwnedMerchantCompanyIds(supabase, ownerUserId);
-            if (companyIds.length === 0) return true;
-
             const { count } = await supabase
                 .from('invoices')
                 .select('*', { count: 'exact', head: true })
-                .in('company_id', companyIds)
+                .eq('company_id', subscriptionCompanyId)
                 .gte('created_at', startOfMonth.toISOString());
 
             if ((count || 0) >= limit) {

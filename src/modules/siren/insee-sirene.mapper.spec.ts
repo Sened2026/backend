@@ -1,17 +1,93 @@
 import {
+    buildInseeRaisonSocialeQuery,
     buildInseeTextSearchQuery,
     getNicSiegeFromUniteLegale,
     mapInseeUniteLegaleAndEtablissement,
     mapInseeEtablissementToResult,
+    normalizeInseeSearchInput,
+    simplifyBusinessNameForRaisonSociale,
 } from './insee-sirene.mapper';
 
+describe('buildInseeRaisonSocialeQuery', () => {
+    it('construit une requête simple raisonSociale sans syntaxe Lucene multi-champs', () => {
+        const q = buildInseeRaisonSocialeQuery('LA FINANCIERE');
+
+        expect(q).toBe('raisonSociale:LA FINANCIERE');
+        expect(q).not.toContain('periode(');
+        expect(q).not.toContain(' OR ');
+        expect(q).not.toContain(' AND ');
+    });
+});
+
+describe('simplifyBusinessNameForRaisonSociale', () => {
+    it('retourne une version métier simplifiée pour les noms avec parenthèses', () => {
+        expect(simplifyBusinessNameForRaisonSociale('LA FINANCIERE (LA FINANCIERE)')).toBe('LA FINANCIERE');
+    });
+
+    it('normalise les apostrophes et les espaces comme la recherche Lucene', () => {
+        expect(simplifyBusinessNameForRaisonSociale("  L’Atelier   d’Anne  ")).toBe("L'Atelier d'Anne");
+        expect(normalizeInseeSearchInput("  L’Atelier   d’Anne  ")).toBe("L'Atelier d'Anne");
+    });
+});
+
 describe('buildInseeTextSearchQuery', () => {
-    it('échappe les caractères Lucene et construit une requête OR sur dénomination et nom', () => {
+    it('construit une requête multi-champs avec un bloc tokenisé AND + fallback phrase', () => {
+        const q = buildInseeTextSearchQuery('La   Fabrique cookie');
+
+        expect(q).toContain('denominationUniteLegale');
+        expect(q).toContain('nomUniteLegale');
+        expect(q).toContain('denominationUsuelle1UniteLegale');
+        expect(q).toContain('denominationUsuelle2UniteLegale');
+        expect(q).toContain('denominationUsuelle3UniteLegale');
+        expect(q).toContain('nomUsageUniteLegale');
+        expect(q).toMatch(/la\*\s+AND\s+fabrique\*\s+AND\s+cookie\*/i);
+        expect(q).toContain('"La Fabrique cookie"');
+    });
+
+    it('normalise les apostrophes typographiques et les espaces', () => {
+        const q = buildInseeTextSearchQuery("  L’Atelier   d’Anne  ");
+
+        expect(q).not.toContain('’');
+        expect(q).toContain(`"L'Atelier d'Anne"`);
+    });
+
+    it('retire la ponctuation du bloc tokenisé pour éviter des tokens pollués', () => {
+        const q = buildInseeTextSearchQuery('LA FINANCIERE (LA FINANCIERE)');
+
+        expect(q).toContain('LA* AND FINANCIERE*');
+        expect(q).not.toContain('\\(LA*');
+        expect(q).not.toContain('FINANCIERE\\)*');
+        expect(q).toContain('"LA FINANCIERE \\(LA FINANCIERE\\)"');
+    });
+
+    it('gère les séparateurs courants (tiret, slash, point, virgule)', () => {
+        const hyphen = buildInseeTextSearchQuery('SAINT-GOBAIN');
+        expect(hyphen).toMatch(/SAINT\*\s+AND\s+GOBAIN\*/);
+        expect(hyphen).not.toContain('SAINT\\-GOBAIN*');
+
+        const slash = buildInseeTextSearchQuery('A/B CONSEIL');
+        expect(slash).toMatch(/A\*\s+AND\s+B\*\s+AND\s+CONSEIL\*/);
+        expect(slash).not.toContain('A\\/B*');
+
+        const dotted = buildInseeTextSearchQuery('S.C.I. DU PARC');
+        expect(dotted).toContain('DU*');
+        expect(dotted).toContain('PARC*');
+        expect(dotted).not.toContain('S\\.C\\.I\\.*');
+
+        const comma = buildInseeTextSearchQuery('ALPHA, BETA');
+        expect(comma).toMatch(/ALPHA\*\s+AND\s+BETA\*/);
+        expect(comma).not.toContain('ALPHA\\,*');
+    });
+
+    it('normalise & et conserve une recherche robuste sur les mots', () => {
         const q = buildInseeTextSearchQuery('ACME & Co');
-        expect(q).toContain('periode(denominationUniteLegale:');
-        expect(q).toContain('OR');
-        expect(q).toContain('nomUniteLegale:');
-        expect(q).toMatch(/\\&/); // & échappé pour Lucene
+        expect(q).toMatch(/ACME\*\s+AND\s+Co\*/i);
+        expect(q).not.toContain('\\&*');
+    });
+
+    it('ajoute un fallback phrase sanitizé pour les variantes de ponctuation', () => {
+        const q = buildInseeTextSearchQuery('XYZ HOLDING SAS');
+        expect(q).toContain('"XYZ HOLDING SAS"');
     });
 });
 

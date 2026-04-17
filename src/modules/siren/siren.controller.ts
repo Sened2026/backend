@@ -8,7 +8,7 @@ import {
     UseGuards,
 } from '@nestjs/common';
 import type { Response } from 'express';
-import { SirenRateLimitError, SirenService, SirenSearchResult } from './siren.service';
+import { SirenRateLimitError, SirenService, SirenSearchResult, type SirenLookupPage } from './siren.service';
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard';
 
 /**
@@ -69,6 +69,34 @@ export class SirenController {
     }
 
     /**
+     * Recherche unifiée publique paginée.
+     */
+    @Get('public-lookup-paged')
+    async publicLookupPaged(
+        @Query('q') query: string,
+        @Query('limit') limit?: string,
+        @Query('cursor') cursor?: string,
+        @Res({ passthrough: true }) response?: Response,
+    ): Promise<SirenLookupPage> {
+        if (!query || query.trim().length < 3) {
+            return {
+                items: [],
+                total: 0,
+                limit: this.parseLimit(limit, 10, 25),
+                nextCursor: null,
+                hasMore: false,
+            };
+        }
+
+        const maxResults = this.parseLimit(limit, 10, 25);
+        try {
+            return await this.sirenService.lookupPaged(query, maxResults, cursor);
+        } catch (error) {
+            this.rethrowRateLimit(error, response as Response);
+        }
+    }
+
+    /**
      * Recherche unifiée authentifiée.
      * Détecte automatiquement SIREN (9 chiffres), SIRET (14 chiffres) ou texte.
      */
@@ -82,6 +110,35 @@ export class SirenController {
         const maxResults = this.parseLimit(limit, 10);
         try {
             return await this.sirenService.lookup(query, maxResults);
+        } catch (error) {
+            this.rethrowRateLimit(error, response as Response);
+        }
+    }
+
+    /**
+     * Recherche unifiée authentifiée paginée.
+     */
+    @Get('lookup-paged')
+    @UseGuards(SupabaseAuthGuard)
+    async lookupPaged(
+        @Query('q') query: string,
+        @Query('limit') limit?: string,
+        @Query('cursor') cursor?: string,
+        @Res({ passthrough: true }) response?: Response,
+    ): Promise<SirenLookupPage> {
+        if (!query || query.trim().length < 3) {
+            return {
+                items: [],
+                total: 0,
+                limit: this.parseLimit(limit, 25, 100),
+                nextCursor: null,
+                hasMore: false,
+            };
+        }
+
+        const maxResults = this.parseLimit(limit, 25, 100);
+        try {
+            return await this.sirenService.lookupPaged(query, maxResults, cursor);
         } catch (error) {
             this.rethrowRateLimit(error, response as Response);
         }

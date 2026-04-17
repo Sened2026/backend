@@ -1,22 +1,61 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { SirenRateLimitError } from './siren.types';
-import type { SirenSearchResult } from './siren.types';
+import type { SirenLookupPage, SirenSearchResult } from './siren.types';
 import {
+    buildInseeRaisonSocialeQuery,
     buildInseeTextSearchQuery,
     getNicSiegeFromUniteLegale,
     mapInseeEtablissementToResult,
     mapInseeUniteLegaleAndEtablissement,
+    normalizeInseeSearchInput,
+    simplifyBusinessNameForRaisonSociale,
     type InseeEtablissement,
     type InseeUniteLegale,
 } from './insee-sirene.mapper';
 
-const DEFAULT_RETRY_AFTER_SECONDS = 60;
+const DEFAULT_RETRY_AFTER_SECONDS = 10;
+
+export type InseeTextStrategy = 'raisonSociale' | 'lucene';
+
+interface InseeCursorPayload {
+    v: 1;
+    strategy: InseeTextStrategy;
+    upstreamCursor: string;
+}
+
+export interface InseeTextSearchDiagnostics {
+    queryRaw: string;
+    queryNormalized: string;
+    queryPrimaryName: string;
+    strategy: InseeTextStrategy;
+    limitRequested: number;
+    limitEffective: number;
+    total: number;
+    displayedCount: number;
+    hasNextCursor: boolean;
+    nextCursorPresent: boolean;
+    fallbackTriggered: boolean;
+}
+
+export interface InseeTextSearchResponse {
+    page: SirenLookupPage;
+    diagnostics: InseeTextSearchDiagnostics;
+}
+
+export interface InseeTextSearchOptions {
+    lightResults?: boolean;
+}
 
 interface ReponseUniteLegale {
     uniteLegale?: InseeUniteLegale;
 }
 
 interface ReponseUnitesLegales {
+    header?: {
+        total?: number;
+        curseur?: string | null;
+        curseurSuivant?: string | null;
+    };
     unitesLegales?: InseeUniteLegale[];
 }
 
@@ -89,6 +128,152 @@ export class InseeSireneProvider {
         return { status: response.status, data };
     }
 
+    private encodeCursor(strategy: InseeTextStrategy, upstreamCursor: string): string {
+        return Buffer.from(
+            JSON.stringify({
+                v: 1,
+                strategy,
+                upstreamCursor,
+            } satisfies InseeCursorPayload),
+            'utf8',
+        ).toString('base64url');
+    }
+
+    private decodeCursor(cursor: string): InseeCursorPayload {
+        const trimmedCursor = cursor.trim();
+
+        try {
+            const decoded = Buffer.from(trimmedCursor, 'base64url').toString('utf8');
+            const parsed = JSON.parse(decoded) as Partial<InseeCursorPayload>;
+
+            if (
+                parsed?.v === 1 &&
+                (parsed.strategy === 'raisonSociale' || parsed.strategy === 'lucene') &&
+                typeof parsed.upstreamCursor === 'string' &&
+                parsed.upstreamCursor.trim().length > 0
+            ) {
+                return {
+                    v: 1,
+                    strategy: parsed.strategy,
+                    upstreamCursor: parsed.upstreamCursor,
+                };
+            }
+        } catch {
+            // Support legacy cursors that directly contained the upstream INSEE cursor.
+        }
+
+        return {
+            v: 1,
+            strategy: 'lucene',
+            upstreamCursor: trimmedCursor,
+        };
+    }
+
+    private buildDiagnostics(
+        query: string,
+        primaryName: string,
+        strategy: InseeTextStrategy,
+        limitRequested: number,
+        limitEffective: number,
+        page: SirenLookupPage,
+        fallbackTriggered: boolean,
+    ): InseeTextSearchDiagnostics {
+        return {
+            queryRaw: query,
+            queryNormalized: normalizeInseeSearchInput(query),
+            queryPrimaryName: primaryName,
+            strategy,
+            limitRequested,
+            limitEffective,
+            total: page.total,
+            displayedCount: page.items.length,
+            hasNextCursor: page.hasMore,
+            nextCursorPresent: !!page.nextCursor,
+            fallbackTriggered,
+        };
+    }
+
+    private async searchByTextStrategy(
+        rawQuery: string,
+        strategy: InseeTextStrategy,
+        limit: number,
+        upstreamCursor?: string | null,
+        options?: InseeTextSearchOptions,
+    ): Promise<SirenLookupPage> {
+        const query =
+            strategy === 'raisonSociale'
+                ? buildInseeRaisonSocialeQuery(rawQuery)
+                : buildInseeTextSearchQuery(rawQuery);
+        const effectiveCursor = upstreamCursor?.trim() || '*';
+        const path = `/siren?q=${encodeURIComponent(query)}&nombre=${limit}&curseur=${encodeURIComponent(
+            effectiveCursor,
+        )}`;
+        const res = await this.requestJson(path);
+
+        if ([400, 404].includes(res.status)) {
+            console.warn(
+                `[SIREN/insee] text search returned ${res.status} for strategy="${strategy}" query="${rawQuery.trim()}"`,
+            );
+            return {
+                items: [],
+                total: 0,
+                limit,
+                nextCursor: null,
+                hasMore: false,
+            };
+        }
+
+        if (res.status >= 400 || !res.data) {
+            throw new BadRequestException('Erreur lors de la recherche');
+        }
+
+        const body = res.data as ReponseUnitesLegales;
+        const list = body.unitesLegales;
+        if (!list?.length) {
+            return {
+                items: [],
+                total: body.header?.total ?? 0,
+                limit,
+                nextCursor: null,
+                hasMore: false,
+            };
+        }
+
+        const results: SirenSearchResult[] = [];
+        for (const ul of list) {
+            if (!ul?.siren) continue;
+            let etab: InseeEtablissement | null = null;
+            if (!options?.lightResults) {
+                const nic = getNicSiegeFromUniteLegale(ul);
+                if (nic) {
+                    const siret = `${ul.siren}${nic}`;
+                    const er = await this.requestJson(`/siret/${encodeURIComponent(siret)}`);
+                    if (er.status === 200 && er.data) {
+                        etab = (er.data as ReponseEtablissement).etablissement ?? null;
+                    }
+                }
+            }
+            results.push(mapInseeUniteLegaleAndEtablissement(ul, etab));
+        }
+
+        const currentCursor = body.header?.curseur ?? effectiveCursor;
+        const upstreamNextCursor =
+            body.header?.curseurSuivant && body.header.curseurSuivant !== currentCursor
+                ? body.header.curseurSuivant
+                : null;
+        const nextCursor = upstreamNextCursor
+            ? this.encodeCursor(strategy, upstreamNextCursor)
+            : null;
+
+        return {
+            items: results,
+            total: body.header?.total ?? results.length,
+            limit,
+            nextCursor,
+            hasMore: !!nextCursor,
+        };
+    }
+
     async searchBySiren(siren: string): Promise<SirenSearchResult> {
         const res = await this.requestJson(`/siren/${encodeURIComponent(siren)}`);
 
@@ -139,41 +324,85 @@ export class InseeSireneProvider {
         return mapInseeEtablissementToResult(etab);
     }
 
-    async searchByText(query: string, limit: number): Promise<SirenSearchResult[]> {
-        const q = buildInseeTextSearchQuery(query);
-        const path = `/siren?q=${encodeURIComponent(q)}&nombre=${limit}`;
-        const res = await this.requestJson(path);
+    async searchByTextWithDiagnostics(
+        query: string,
+        limit: number,
+        cursor?: string | null,
+        options?: InseeTextSearchOptions,
+    ): Promise<InseeTextSearchResponse> {
+        const primaryName = simplifyBusinessNameForRaisonSociale(query);
+        const trimmedCursor = cursor?.trim();
 
-        if ([400, 404].includes(res.status)) {
-            console.warn(`[SIREN/insee] text search returned ${res.status} for query "${query.trim()}"`);
-            return [];
+        if (trimmedCursor) {
+            const decodedCursor = this.decodeCursor(trimmedCursor);
+            const page = await this.searchByTextStrategy(
+                decodedCursor.strategy === 'raisonSociale' ? primaryName : query,
+                decodedCursor.strategy,
+                limit,
+                decodedCursor.upstreamCursor,
+                options,
+            );
+
+            return {
+                page,
+                diagnostics: this.buildDiagnostics(
+                    query,
+                    primaryName,
+                    decodedCursor.strategy,
+                    limit,
+                    limit,
+                    page,
+                    false,
+                ),
+            };
         }
 
-        if (res.status >= 400 || !res.data) {
-            throw new BadRequestException('Erreur lors de la recherche');
+        const phaseOneLimit = Math.min(limit, 10);
+        const raisonSocialePage = await this.searchByTextStrategy(
+            primaryName,
+            'raisonSociale',
+            phaseOneLimit,
+            null,
+            options,
+        );
+
+        if (raisonSocialePage.items.length > 0) {
+            return {
+                page: raisonSocialePage,
+                diagnostics: this.buildDiagnostics(
+                    query,
+                    primaryName,
+                    'raisonSociale',
+                    limit,
+                    phaseOneLimit,
+                    raisonSocialePage,
+                    false,
+                ),
+            };
         }
 
-        const body = res.data as ReponseUnitesLegales;
-        const list = body.unitesLegales;
-        if (!list?.length) {
-            return [];
-        }
+        const lucenePage = await this.searchByTextStrategy(query, 'lucene', limit, null, options);
+        return {
+            page: lucenePage,
+            diagnostics: this.buildDiagnostics(
+                query,
+                primaryName,
+                'lucene',
+                limit,
+                limit,
+                lucenePage,
+                true,
+            ),
+        };
+    }
 
-        const results: SirenSearchResult[] = [];
-        for (const ul of list) {
-            if (!ul?.siren) continue;
-            const nic = getNicSiegeFromUniteLegale(ul);
-            let etab: InseeEtablissement | null = null;
-            if (nic) {
-                const siret = `${ul.siren}${nic}`;
-                const er = await this.requestJson(`/siret/${encodeURIComponent(siret)}`);
-                if (er.status === 200 && er.data) {
-                    etab = (er.data as ReponseEtablissement).etablissement ?? null;
-                }
-            }
-            results.push(mapInseeUniteLegaleAndEtablissement(ul, etab));
-        }
-
-        return results;
+    async searchByText(
+        query: string,
+        limit: number,
+        cursor?: string | null,
+        options?: InseeTextSearchOptions,
+    ): Promise<SirenLookupPage> {
+        const response = await this.searchByTextWithDiagnostics(query, limit, cursor, options);
+        return response.page;
     }
 }
