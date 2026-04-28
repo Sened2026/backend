@@ -1,4 +1,4 @@
-import { ForbiddenException } from "@nestjs/common";
+import { ConflictException, ForbiddenException } from "@nestjs/common";
 import { getSupabaseAdmin } from "../../config/supabase.config";
 import {
   type CompanyOwnerRole,
@@ -11,14 +11,22 @@ jest.mock("../../config/supabase.config", () => ({
 }));
 
 function createDeleteSuccessChain() {
-  return {
-    eq: jest.fn().mockReturnValue({
-      eq: jest.fn().mockResolvedValue({ error: null }),
-    }),
+  const chain: any = {
+    eq: jest.fn(() => chain),
+    ilike: jest.fn(() => chain),
+    is: jest.fn(() => chain),
+    lt: jest.fn().mockResolvedValue({ error: null }),
+    then: undefined,
   };
+
+  return chain;
 }
 
-function createInviteSupabaseMock(options?: { existingUserId?: string }) {
+function createInviteSupabaseMock(options?: {
+  existingUserId?: string;
+  existingPendingInvite?: boolean;
+  insertError?: { code?: string; message?: string };
+}) {
   let insertedPayload: {
     company_id: string;
     email: string;
@@ -95,6 +103,13 @@ function createInviteSupabaseMock(options?: { existingUserId?: string }) {
                 eq: jest.fn().mockReturnValue({
                   ilike: jest.fn().mockReturnValue({
                     is: jest.fn().mockReturnValue({
+                      gt: jest.fn().mockReturnValue({
+                        maybeSingle: jest.fn().mockResolvedValue({
+                          data: options?.existingPendingInvite
+                            ? { id: "pending-invite-1" }
+                            : null,
+                        }),
+                      }),
                       maybeSingle: jest.fn().mockResolvedValue({ data: null }),
                     }),
                   }),
@@ -110,12 +125,15 @@ function createInviteSupabaseMock(options?: { existingUserId?: string }) {
               return {
                 select: jest.fn().mockReturnValue({
                   single: jest.fn().mockResolvedValue({
-                    data: {
-                      id: "invite-1",
-                      token: "token-1",
-                      email: payload.email,
-                      role: payload.role,
-                    },
+                    data: options?.insertError
+                      ? null
+                      : {
+                          id: "invite-1",
+                          token: "token-1",
+                          email: payload.email,
+                          role: payload.role,
+                        },
+                    error: options?.insertError || null,
                   }),
                 }),
               };
@@ -163,6 +181,62 @@ function createInviteSupabaseMock(options?: { existingUserId?: string }) {
       }),
     },
     getInsertedPayload: () => insertedPayload,
+  };
+}
+
+function createResendInvitationSupabaseMock(invitation: any) {
+  return {
+    from: jest.fn((table: string) => {
+      if (table === "company_invitations") {
+        return {
+          select: jest.fn(() => ({
+            eq: jest.fn(() => ({
+              eq: jest.fn(() => ({
+                maybeSingle: jest.fn().mockResolvedValue({
+                  data: invitation,
+                  error: null,
+                }),
+              })),
+            })),
+          })),
+        };
+      }
+
+      if (table === "companies") {
+        return {
+          select: jest.fn(() => ({
+            eq: jest.fn().mockReturnValue({
+              single: jest.fn().mockResolvedValue({
+                data: {
+                  name: "Acme",
+                  email: "contact@acme.test",
+                  phone: "0102030405",
+                  address: "1 rue Exemple",
+                  postal_code: "75001",
+                  city: "Paris",
+                  siren: "123456789",
+                  logo_url: "https://cdn.example.com/acme-logo.png",
+                },
+              }),
+            }),
+          })),
+        };
+      }
+
+      if (table === "profiles") {
+        return {
+          select: jest.fn(() => ({
+            eq: jest.fn().mockReturnValue({
+              single: jest.fn().mockResolvedValue({
+                data: { first_name: "Jane", last_name: "Doe" },
+              }),
+            }),
+          })),
+        };
+      }
+
+      throw new Error(`Unexpected table: ${table}`);
+    }),
   };
 }
 
@@ -381,6 +455,52 @@ describe("CompanyService member management permissions", () => {
 
     expect(result.status).toBe("pending");
     expect(rollbackSpy).not.toHaveBeenCalled();
+  });
+
+  it("rejects duplicate pending invitations with a business error", async () => {
+    const inviteMock = createInviteSupabaseMock({ existingPendingInvite: true });
+
+    jest.mocked(getSupabaseAdmin).mockReturnValue(inviteMock.supabase as any);
+    mockUserAccessContext("merchant_admin", "merchant_admin");
+
+    await expect(
+      service.inviteMember(
+        "user-1",
+        "company-1",
+        "member@example.com",
+        "merchant_consultant",
+        "admin@example.com",
+      ),
+    ).rejects.toThrow(
+      new ConflictException("Une invitation est déjà en attente pour cet email"),
+    );
+
+    expect(inviteMock.getInsertedPayload()).toBeNull();
+  });
+
+  it("maps unique invitation constraint errors to a business error", async () => {
+    const inviteMock = createInviteSupabaseMock({
+      insertError: {
+        code: "23505",
+        message:
+          'duplicate key value violates unique constraint "uq_company_invitations_company_email_lower"',
+      },
+    });
+
+    jest.mocked(getSupabaseAdmin).mockReturnValue(inviteMock.supabase as any);
+    mockUserAccessContext("merchant_admin", "merchant_admin");
+
+    await expect(
+      service.inviteMember(
+        "user-1",
+        "company-1",
+        "member@example.com",
+        "merchant_consultant",
+        "admin@example.com",
+      ),
+    ).rejects.toThrow(
+      new ConflictException("Une invitation est déjà en attente pour cet email"),
+    );
   });
 
   it.each(["accountant", "accountant_consultant"] as CompanyRole[])(
@@ -896,6 +1016,78 @@ describe("CompanyService member management permissions", () => {
     expect(subscriptionService.syncMemberQuantity).toHaveBeenCalledWith(
       "company-1",
     );
+  });
+
+  it("resends a pending member invitation", async () => {
+    jest.mocked(getSupabaseAdmin).mockReturnValue(
+      createResendInvitationSupabaseMock({
+        id: "invite-1",
+        company_id: "company-1",
+        email: "member@example.com",
+        role: "merchant_consultant",
+        token: "token-1",
+        expires_at: "2099-04-15T10:00:00.000Z",
+        accepted_at: null,
+        invitation_type: "member",
+      }) as any,
+    );
+    mockUserAccessContext("merchant_admin", "merchant_admin");
+
+    await expect(
+      service.resendMemberInvitation("admin-1", "company-1", "invite-1"),
+    ).resolves.toEqual({ message: "Invitation renvoyée" });
+
+    expect(notificationService.sendInviteEmail).toHaveBeenCalledWith(
+      "member@example.com",
+      "Jane Doe",
+      expect.objectContaining({ name: "Acme" }),
+      "merchant_consultant",
+      "token-1",
+    );
+  });
+
+  it("rejects resending an accepted member invitation", async () => {
+    jest.mocked(getSupabaseAdmin).mockReturnValue(
+      createResendInvitationSupabaseMock({
+        id: "invite-1",
+        company_id: "company-1",
+        email: "member@example.com",
+        role: "merchant_consultant",
+        token: "token-1",
+        expires_at: "2099-04-15T10:00:00.000Z",
+        accepted_at: "2026-04-15T10:00:00.000Z",
+        invitation_type: "member",
+      }) as any,
+    );
+    mockUserAccessContext("merchant_admin", "merchant_admin");
+
+    await expect(
+      service.resendMemberInvitation("admin-1", "company-1", "invite-1"),
+    ).rejects.toThrow("Cette invitation a déjà été acceptée");
+
+    expect(notificationService.sendInviteEmail).not.toHaveBeenCalled();
+  });
+
+  it("rejects resending an expired member invitation", async () => {
+    jest.mocked(getSupabaseAdmin).mockReturnValue(
+      createResendInvitationSupabaseMock({
+        id: "invite-1",
+        company_id: "company-1",
+        email: "member@example.com",
+        role: "merchant_consultant",
+        token: "token-1",
+        expires_at: "2000-04-15T10:00:00.000Z",
+        accepted_at: null,
+        invitation_type: "member",
+      }) as any,
+    );
+    mockUserAccessContext("merchant_admin", "merchant_admin");
+
+    await expect(
+      service.resendMemberInvitation("admin-1", "company-1", "invite-1"),
+    ).rejects.toThrow("Cette invitation a expiré");
+
+    expect(notificationService.sendInviteEmail).not.toHaveBeenCalled();
   });
 
   it("allows accountant to cancel a cabinet invitation", async () => {

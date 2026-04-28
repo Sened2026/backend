@@ -587,6 +587,16 @@ export class CompanyController {
     return this.companyService.finalizeMemberInvitation(userId, id, invitationId);
   }
 
+  @Post(":id/invitations/:invitationId/resend")
+  @HttpCode(HttpStatus.OK)
+  async resendInvitation(
+    @CurrentUser("id") userId: string,
+    @Param("id", ParseUUIDPipe) id: string,
+    @Param("invitationId", ParseUUIDPipe) invitationId: string,
+  ) {
+    return this.companyService.resendMemberInvitation(userId, id, invitationId);
+  }
+
   @Delete(":id/invitations/:invitationId")
   @HttpCode(HttpStatus.OK)
   async cancelInvitation(

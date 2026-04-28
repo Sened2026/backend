@@ -3024,6 +3024,58 @@ export class CompanyService {
     );
   }
 
+  async resendMemberInvitation(
+    userId: string,
+    companyId: string,
+    invitationId: string,
+  ): Promise<{ message: string }> {
+    const accessContext = await this.checkUserAccessContext(userId, companyId);
+    this.ensureCanManageMembers(
+      accessContext.role,
+      accessContext.companyOwnerRole,
+    );
+
+    const supabase = getSupabaseAdmin();
+    const { data: invitation, error } = await supabase
+      .from("company_invitations")
+      .select(
+        "id, company_id, email, role, token, expires_at, accepted_at, invitation_type",
+      )
+      .eq("id", invitationId)
+      .eq("company_id", companyId)
+      .maybeSingle();
+
+    if (error) {
+      throw new BadRequestException(`Erreur: ${error.message}`);
+    }
+
+    if (!invitation) {
+      throw new NotFoundException("Invitation introuvable");
+    }
+
+    if (((invitation as any).invitation_type || "member") !== "member") {
+      throw new NotFoundException("Invitation introuvable");
+    }
+
+    if (invitation.accepted_at) {
+      throw new BadRequestException("Cette invitation a déjà été acceptée");
+    }
+
+    if (new Date(invitation.expires_at).getTime() <= Date.now()) {
+      throw new BadRequestException("Cette invitation a expiré");
+    }
+
+    await this.sendMemberInvitationEmail(
+      userId,
+      companyId,
+      invitation.email,
+      invitation.role as CompanyRole,
+      invitation.token,
+    );
+
+    return { message: "Invitation renvoyée" };
+  }
+
   async searchAccountants(
     query: string,
   ): Promise<{ id: string; name: string; siren: string | null }[]> {
@@ -3478,6 +3530,7 @@ export class CompanyService {
   ): Promise<any> {
     const supabase = getSupabaseAdmin();
     const normalizedEmail = email.trim().toLowerCase();
+    const nowIso = new Date().toISOString();
 
     const { data: existingUser } = await supabase
       .from("profiles")
@@ -3500,12 +3553,21 @@ export class CompanyService {
       }
     }
 
+    await supabase
+      .from("company_invitations")
+      .delete()
+      .eq("company_id", companyId)
+      .ilike("email", normalizedEmail)
+      .is("accepted_at", null)
+      .lt("expires_at", nowIso);
+
     const { data: existingInvite } = await supabase
       .from("company_invitations")
       .select("id")
       .eq("company_id", companyId)
       .ilike("email", normalizedEmail)
       .is("accepted_at", null)
+      .gt("expires_at", nowIso)
       .maybeSingle();
 
     if (existingInvite) {
@@ -3527,6 +3589,12 @@ export class CompanyService {
       .single();
 
     if (error || !invitation) {
+      if (this.isUniqueConstraintError(error)) {
+        throw new ConflictException(
+          "Une invitation est déjà en attente pour cet email",
+        );
+      }
+
       throw new BadRequestException(
         `Erreur lors de l'invitation: ${error?.message || "inconnue"}`,
       );
@@ -3625,9 +3693,32 @@ export class CompanyService {
       return { ...invitation, status: "accepted" };
     }
 
+    await this.sendMemberInvitationEmail(
+      userId,
+      companyId,
+      normalizedEmail,
+      role,
+      invitation.token,
+    );
+
+    return { ...invitation, status: "pending" };
+  }
+
+  private async sendMemberInvitationEmail(
+    userId: string,
+    companyId: string,
+    email: string,
+    role: CompanyRole,
+    token: string,
+  ): Promise<void> {
+    const supabase = getSupabaseAdmin();
+    const normalizedEmail = email.trim().toLowerCase();
+
     const { data: company } = await supabase
       .from("companies")
-      .select("name, email, phone, address, postal_code, city, siren, logo_url")
+      .select(
+        "name, email, phone, address, postal_code, city, siren, logo_url",
+      )
       .eq("id", companyId)
       .single();
 
@@ -3647,13 +3738,11 @@ export class CompanyService {
         inviterName,
         company,
         role,
-        invitation.token,
+        token,
       );
     } catch {
       // Ne pas échouer si l'envoi email échoue
     }
-
-    return { ...invitation, status: "pending" };
   }
 
   private async createMerchantSignupInvitation(
@@ -3862,6 +3951,13 @@ export class CompanyService {
       .eq("company_id", companyId);
 
     await this.rollbackPendingMemberInvitation(supabase, invitationId);
+  }
+
+  private isUniqueConstraintError(error: any): boolean {
+    return (
+      error?.code === "23505" ||
+      /duplicate key|unique constraint|constraint/i.test(error?.message || "")
+    );
   }
 
   private extractErrorMessage(error: unknown): string | null {
