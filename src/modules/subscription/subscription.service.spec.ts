@@ -44,6 +44,13 @@ function createSyncMemberQuantitySupabaseMock(options?: {
                                 single: jest.fn().mockResolvedValue({
                                     data: { owner_id: 'owner_123' },
                                 }),
+                                maybeSingle: jest.fn().mockResolvedValue({
+                                    data: {
+                                        rib_iban: 'Carte visa **** 4242',
+                                        rib_bic: '12/2030',
+                                        rib_bank_name: 'Carte bancaire',
+                                    },
+                                }),
                             }),
                         })),
                     };
@@ -87,6 +94,37 @@ function createSyncMemberQuantitySupabaseMock(options?: {
             }),
         },
         getUpdatedPayload: () => updatedPayload,
+    };
+}
+
+function createStripeSubscriptionMock(options?: {
+    memberItemId?: string | null;
+    memberQuantity?: number;
+    defaultPaymentMethod?: string | null;
+    customer?: string;
+}) {
+    const memberItemId = options && Object.prototype.hasOwnProperty.call(options, 'memberItemId')
+        ? options.memberItemId
+        : 'si_member_123';
+    const items = [
+        { id: 'si_base_123', quantity: 1, price: { id: 'price_base_123' } },
+    ];
+
+    if (memberItemId) {
+        items.push({
+            id: memberItemId,
+            quantity: options?.memberQuantity ?? 1,
+            price: { id: 'price_member_123' },
+        });
+    }
+
+    return {
+        id: 'sub_123',
+        customer: options?.customer ?? 'cus_123',
+        default_payment_method: options?.defaultPaymentMethod ?? 'pm_card_123',
+        status: 'active',
+        latest_invoice: null,
+        items: { data: items },
     };
 }
 
@@ -315,11 +353,13 @@ describe('SubscriptionService.syncMemberQuantity', () => {
         jest.mocked(getSupabaseAdmin).mockReturnValue(supabaseMock.supabase as any);
         jest.spyOn(service as any, 'countExtraMembers').mockResolvedValue(2);
 
-        stripeMock.subscriptions.retrieve.mockResolvedValue({
-            id: 'sub_123',
-            customer: 'cus_123',
-            default_payment_method: 'pm_card_123',
-        });
+        stripeMock.subscriptions.retrieve.mockResolvedValue(
+            createStripeSubscriptionMock({
+                memberItemId: 'si_member_123',
+                memberQuantity: 1,
+                defaultPaymentMethod: 'pm_card_123',
+            }),
+        );
         stripeMock.paymentMethods.retrieve.mockResolvedValue({
             id: 'pm_card_123',
             type: 'card',
@@ -354,11 +394,26 @@ describe('SubscriptionService.syncMemberQuantity', () => {
         jest.mocked(getSupabaseAdmin).mockReturnValue(supabaseMock.supabase as any);
         jest.spyOn(service as any, 'countExtraMembers').mockResolvedValue(2);
 
-        stripeMock.subscriptions.retrieve.mockResolvedValue({
-            id: 'sub_123',
-            customer: 'cus_123',
-            default_payment_method: null,
-        });
+        stripeMock.subscriptions.retrieve
+            .mockResolvedValueOnce(
+                createStripeSubscriptionMock({
+                    memberItemId: null,
+                    defaultPaymentMethod: null,
+                }),
+            )
+            .mockResolvedValueOnce(
+                createStripeSubscriptionMock({
+                    memberItemId: null,
+                    defaultPaymentMethod: null,
+                }),
+            )
+            .mockResolvedValueOnce(
+                createStripeSubscriptionMock({
+                    memberItemId: 'si_member_new_123',
+                    memberQuantity: 2,
+                    defaultPaymentMethod: null,
+                }),
+            );
         stripeMock.customers.retrieve.mockResolvedValue({
             id: 'cus_123',
             deleted: false,
@@ -405,11 +460,13 @@ describe('SubscriptionService.syncMemberQuantity', () => {
         jest.mocked(getSupabaseAdmin).mockReturnValue(supabaseMock.supabase as any);
         jest.spyOn(service as any, 'countExtraMembers').mockResolvedValue(2);
 
-        stripeMock.subscriptions.retrieve.mockResolvedValue({
-            id: 'sub_123',
-            customer: 'cus_123',
-            default_payment_method: 'pm_sepa_123',
-        });
+        stripeMock.subscriptions.retrieve.mockResolvedValue(
+            createStripeSubscriptionMock({
+                memberItemId: 'si_member_123',
+                memberQuantity: 1,
+                defaultPaymentMethod: 'pm_sepa_123',
+            }),
+        );
         stripeMock.paymentMethods.retrieve.mockResolvedValue({
             id: 'pm_sepa_123',
             type: 'sepa_debit',
@@ -427,6 +484,91 @@ describe('SubscriptionService.syncMemberQuantity', () => {
         );
         expect(stripeMock.subscriptionItems.update.mock.calls[0][1]).not.toHaveProperty(
             'payment_behavior',
+        );
+    });
+
+    it('clears a stale local member item when Stripe no longer has an add-on and no extra members remain', async () => {
+        const supabaseMock = createSyncMemberQuantitySupabaseMock({
+            stripeMemberItemId: 'si_stale_123',
+            extraMembersQuantity: 1,
+        });
+
+        jest.mocked(getSupabaseAdmin).mockReturnValue(supabaseMock.supabase as any);
+        jest.spyOn(service as any, 'countExtraMembers').mockResolvedValue(0);
+        stripeMock.subscriptions.retrieve.mockResolvedValue(
+            createStripeSubscriptionMock({
+                memberItemId: null,
+                defaultPaymentMethod: 'pm_card_123',
+            }),
+        );
+
+        await service.syncMemberQuantity('company_123');
+
+        expect(stripeMock.subscriptionItems.del).not.toHaveBeenCalled();
+        expect(stripeMock.subscriptionItems.update).not.toHaveBeenCalled();
+        expect(supabaseMock.getUpdatedPayload()).toEqual(
+            expect.objectContaining({
+                stripe_member_item_id: null,
+                extra_members_quantity: 0,
+            }),
+        );
+    });
+
+    it('creates a new member add-on when the stored member item is stale and extra members are due', async () => {
+        const supabaseMock = createSyncMemberQuantitySupabaseMock({
+            stripeMemberItemId: 'si_stale_123',
+            extraMembersQuantity: 0,
+            stripeMemberLookupKey: 'member_lookup_key',
+        });
+
+        jest.mocked(getSupabaseAdmin).mockReturnValue(supabaseMock.supabase as any);
+        jest.spyOn(service as any, 'countExtraMembers').mockResolvedValue(1);
+        stripeMock.subscriptions.retrieve
+            .mockResolvedValueOnce(
+                createStripeSubscriptionMock({
+                    memberItemId: null,
+                    defaultPaymentMethod: 'pm_card_123',
+                }),
+            )
+            .mockResolvedValueOnce(
+                createStripeSubscriptionMock({
+                    memberItemId: null,
+                    defaultPaymentMethod: 'pm_card_123',
+                }),
+            )
+            .mockResolvedValueOnce(
+                createStripeSubscriptionMock({
+                    memberItemId: 'si_member_new_123',
+                    memberQuantity: 1,
+                    defaultPaymentMethod: 'pm_card_123',
+                }),
+            );
+        stripeMock.paymentMethods.retrieve.mockResolvedValue({
+            id: 'pm_card_123',
+            type: 'card',
+        });
+        stripeMock.prices.list.mockResolvedValue({
+            data: [{ id: 'price_member_123' }],
+        });
+        stripeMock.subscriptionItems.create.mockResolvedValue({ id: 'si_member_new_123' });
+
+        await service.syncMemberQuantity('company_123');
+
+        expect(stripeMock.subscriptionItems.update).not.toHaveBeenCalledWith(
+            'si_stale_123',
+            expect.anything(),
+        );
+        expect(stripeMock.subscriptionItems.create).toHaveBeenCalledWith(
+            expect.objectContaining({
+                subscription: 'sub_123',
+                quantity: 1,
+            }),
+        );
+        expect(supabaseMock.getUpdatedPayload()).toEqual(
+            expect.objectContaining({
+                stripe_member_item_id: 'si_member_new_123',
+                extra_members_quantity: 1,
+            }),
         );
     });
 

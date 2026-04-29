@@ -2877,7 +2877,11 @@ export class CompanyService {
       try {
         await this.subscriptionService.syncMemberQuantity(companyId);
       } catch (e) {
-        // Don't fail member removal if Stripe sync fails
+        console.error("Erreur synchronisation facturation après retrait membre", {
+          companyId,
+          memberUserId,
+          error: this.extractErrorMessage(e),
+        });
       }
     }
 

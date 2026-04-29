@@ -299,6 +299,27 @@ export class SubscriptionService {
         return subscription.items.data[0];
     }
 
+    private getMemberItem(
+        subscription: Stripe.Subscription,
+        expectedBaseItemId?: string | null,
+        expectedMemberItemId?: string | null,
+    ): Stripe.SubscriptionItem | undefined {
+        if (expectedMemberItemId) {
+            const matched = subscription.items.data.find((item) => item.id === expectedMemberItemId);
+            if (matched) {
+                return matched;
+            }
+        }
+
+        const baseItem = this.getBaseItem(subscription, expectedBaseItemId);
+        return subscription.items.data.find((item) => item.id !== baseItem?.id);
+    }
+
+    private isStripeResourceMissing(error: unknown): boolean {
+        const stripeError = error as { code?: string; statusCode?: number; type?: string } | null;
+        return stripeError?.code === 'resource_missing' || stripeError?.statusCode === 404;
+    }
+
     private getPeriodEndFromSubscription(
         subscription: Stripe.Subscription,
         expectedBaseItemId?: string | null,
@@ -2872,10 +2893,8 @@ export class SubscriptionService {
                     const memberItem = sub.items.data.find(
                         (item) => item.id !== baseItem?.id,
                     );
-                    if (memberItem) {
-                        updateData.stripe_member_item_id = memberItem.id;
-                        updateData.extra_members_quantity = memberItem.quantity || 0;
-                    }
+                    updateData.stripe_member_item_id = memberItem?.id || null;
+                    updateData.extra_members_quantity = memberItem?.quantity || 0;
                 }
 
                 await supabase
@@ -3042,7 +3061,7 @@ export class SubscriptionService {
         // Get company subscription
         const { data: subscription } = await supabase
             .from('subscriptions')
-            .select('stripe_subscription_id, stripe_member_item_id, plan_id, extra_members_quantity')
+            .select('stripe_subscription_id, stripe_base_item_id, stripe_member_item_id, plan_id, extra_members_quantity')
             .eq('company_id', companyId)
             .maybeSingle();
 
@@ -3054,35 +3073,68 @@ export class SubscriptionService {
             companyId,
             'merchant_admin',
         );
-        const defaultPaymentMethodType = await this.getDefaultSubscriptionPaymentMethodType(
-            stripe,
+        let stripeSubscription = await stripe.subscriptions.retrieve(
             subscription.stripe_subscription_id,
+            { expand: ['latest_invoice.payment_intent'] },
         );
+        let memberItem = this.getMemberItem(
+            stripeSubscription,
+            subscription.stripe_base_item_id,
+            subscription.stripe_member_item_id,
+        );
+        let nextMemberItemId = memberItem?.id || null;
+        const stripeMemberQuantity = memberItem?.quantity || 0;
 
-        let nextMemberItemId = subscription.stripe_member_item_id || null;
-
-        if (extraMembers === (subscription.extra_members_quantity || 0)) {
+        if (
+            extraMembers === (subscription.extra_members_quantity || 0)
+            && stripeMemberQuantity === extraMembers
+            && (subscription.stripe_member_item_id || null) === nextMemberItemId
+        ) {
             return null;
         }
 
+        let stripeMutationPerformed = false;
+
         if (extraMembers <= 0) {
-            if (subscription.stripe_member_item_id) {
-                await stripe.subscriptionItems.del(subscription.stripe_member_item_id, {
-                    proration_behavior: 'create_prorations',
-                });
+            if (memberItem) {
+                try {
+                    await stripe.subscriptionItems.del(memberItem.id, {
+                        proration_behavior: 'create_prorations',
+                    });
+                    stripeMutationPerformed = true;
+                } catch (error) {
+                    if (!this.isStripeResourceMissing(error)) {
+                        throw error;
+                    }
+                }
                 nextMemberItemId = null;
             }
-        } else if (subscription.stripe_member_item_id) {
-            const isIncreasingQuantity = extraMembers > (subscription.extra_members_quantity || 0);
+        } else if (memberItem) {
+            const isIncreasingQuantity = extraMembers > stripeMemberQuantity;
+            const defaultPaymentMethodType = await this.getDefaultSubscriptionPaymentMethodType(
+                stripe,
+                subscription.stripe_subscription_id,
+            );
             const billingParams = this.getMemberItemBillingParams(
                 defaultPaymentMethodType,
                 isIncreasingQuantity,
             );
 
-            await stripe.subscriptionItems.update(subscription.stripe_member_item_id, {
-                quantity: extraMembers,
-                ...billingParams,
-            });
+            if (stripeMemberQuantity !== extraMembers) {
+                try {
+                    await stripe.subscriptionItems.update(memberItem.id, {
+                        quantity: extraMembers,
+                        ...billingParams,
+                    });
+                    stripeMutationPerformed = true;
+                } catch (error) {
+                    if (!this.isStripeResourceMissing(error)) {
+                        throw error;
+                    }
+                    memberItem = undefined;
+                    nextMemberItemId = null;
+                }
+            }
         } else {
             if (!subscription.plan_id) {
                 return null;
@@ -3099,6 +3151,10 @@ export class SubscriptionService {
             }
 
             const memberPriceId = await this.resolveStripePriceId(stripe, plan.stripe_member_lookup_key);
+            const defaultPaymentMethodType = await this.getDefaultSubscriptionPaymentMethodType(
+                stripe,
+                subscription.stripe_subscription_id,
+            );
             const billingParams = this.getMemberItemBillingParams(
                 defaultPaymentMethodType,
                 true,
@@ -3110,12 +3166,22 @@ export class SubscriptionService {
                 ...billingParams,
             });
             nextMemberItemId = createdItem.id;
+            stripeMutationPerformed = true;
         }
 
-        const stripeSubscription = await stripe.subscriptions.retrieve(
-            subscription.stripe_subscription_id,
-            { expand: ['latest_invoice.payment_intent'] },
-        );
+        if (stripeMutationPerformed) {
+            stripeSubscription = await stripe.subscriptions.retrieve(
+                subscription.stripe_subscription_id,
+                { expand: ['latest_invoice.payment_intent'] },
+            );
+            memberItem = this.getMemberItem(
+                stripeSubscription,
+                subscription.stripe_base_item_id,
+                nextMemberItemId,
+            );
+            nextMemberItemId = memberItem?.id || null;
+        }
+
         const latestInvoice = stripeSubscription.latest_invoice as Stripe.Invoice | null;
         const clientSecret = this.getLatestInvoiceClientSecret(latestInvoice);
 
@@ -3182,16 +3248,11 @@ export class SubscriptionService {
             return false;
         }
 
-        const memberItem =
-            (subscription.stripe_member_item_id
-                ? stripeSubscription.items.data.find(
-                    (item) => item.id === subscription.stripe_member_item_id,
-                )
-                : null)
-            || stripeSubscription.items.data.find(
-                (item) => item.id !== subscription.stripe_base_item_id,
-            )
-            || null;
+        const memberItem = this.getMemberItem(
+            stripeSubscription,
+            subscription.stripe_base_item_id,
+            subscription.stripe_member_item_id,
+        ) || null;
         const stripeMemberQuantity = memberItem?.quantity || 0;
 
         if (stripeMemberQuantity < extraMembers) {
@@ -3200,7 +3261,7 @@ export class SubscriptionService {
 
         if (
             (subscription.extra_members_quantity || 0) !== extraMembers
-            || (memberItem?.id && memberItem.id !== subscription.stripe_member_item_id)
+            || (memberItem?.id || null) !== (subscription.stripe_member_item_id || null)
         ) {
             await supabase
                 .from('subscriptions')
